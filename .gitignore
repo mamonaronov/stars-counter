@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project
+.env
+.env.runtime
+data/
+backups/
+.venv/
+docker-compose.override.yml

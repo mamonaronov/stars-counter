@@ -1,0 +1,9 @@
+aiogram==3.31.0
+aiohttp-socks==0.10.1
+aiosqlite==0.21.0
+apscheduler==3.10.4
+openpyxl==3.1.5
+python-dotenv==1.1.0
+tzdata==2025.2
+pytest==8.3.5
+pytest-asyncio==0.25.3

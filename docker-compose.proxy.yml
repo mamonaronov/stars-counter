@@ -1,0 +1,12 @@
+# Overlay for servers where Telegram is reachable only through the mihomo-proxy compose
+# (Docker network `telegram-proxy`, SOCKS at socks5h://proxy:11808).
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d --build
+services:
+  bot:
+    networks:
+      - default
+      - telegram-proxy
+
+networks:
+  telegram-proxy:
+    external: true

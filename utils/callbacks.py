@@ -1,0 +1,23 @@
+"""Callback_data prefixes. Telegram limit is 64 bytes, so they stay short."""
+
+NAV_MAIN = "n:m"
+NAV_CANCEL = "n:c"
+NOOP = "noop"
+
+# sections
+SEC_ATTENDANCE = "s:att"
+SEC_MY = "s:my"
+SEC_EVENTS = "s:ev"
+SEC_NEW_EVENT = "s:new"
+SEC_TEMPLATES = "s:tpl"
+SEC_MONTHS = "s:mon"
+SEC_REQUESTS = "s:req"
+SEC_EXCUSES = "s:exc"
+SEC_REPORTS = "s:rep"
+SEC_STUDENTS = "s:stu"
+SEC_ROLES = "s:rol"
+SEC_AUDIT = "s:aud"
+SEC_VERIFY = "s:ver"
+SEC_SERVICE = "s:srv"
+SEC_HELP = "s:help"
+SEC_NEW_REQUEST = "s:nreq"

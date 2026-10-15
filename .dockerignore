@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+docker-compose.override.yml
+data
+backups
+__pycache__
+.pytest_cache
+.venv
+venv
+*.md
+tests

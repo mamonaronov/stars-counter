@@ -1,0 +1,21 @@
+services:
+  bot:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_TITLE: ${GIT_COMMIT_TITLE:-unknown}
+    image: stars-counter-bot:latest
+    container_name: stars-counter-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    stop_grace_period: 30s
