@@ -35,6 +35,26 @@ def _optional(name: str) -> str | None:
     return value or None
 
 
+def _telegram_backup_interval_minutes() -> int:
+    minutes_raw = os.getenv("TELEGRAM_BACKUP_INTERVAL_MINUTES")
+    if minutes_raw is not None and minutes_raw.strip() != "":
+        return max(0, int(minutes_raw))
+    hours_raw = os.getenv("TELEGRAM_BACKUP_INTERVAL_HOURS")
+    if hours_raw is not None and hours_raw.strip() != "":
+        return max(0, int(hours_raw) * 60)
+    return 60
+
+
+def _optional_int(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     bot_token: str
@@ -44,11 +64,14 @@ class Config:
     backup_path: Path
     backup_interval_hours: int
     backup_keep: int
-    telegram_backup_interval_hours: int
+    telegram_backup_interval_minutes: int
     log_level: str
     telegram_proxy_url: str | None
     org_title: str = "Посещаемость групп"
     required_db_version: int = REQUIRED_DB_VERSION
+    markers_group_id: int | None = None
+    markers_export_interval_minutes: int = 10
+    telegram_backup_root: Path = PROJECT_ROOT
 
 
 def load_config() -> Config:
@@ -71,8 +94,11 @@ def load_config() -> Config:
         backup_path=backup_path,
         backup_interval_hours=max(1, _int("BACKUP_INTERVAL_HOURS", 6)),
         backup_keep=max(1, _int("BACKUP_KEEP", 14)),
-        telegram_backup_interval_hours=max(0, _int("TELEGRAM_BACKUP_INTERVAL_HOURS", 24)),
+        telegram_backup_interval_minutes=_telegram_backup_interval_minutes(),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         telegram_proxy_url=_optional("TELEGRAM_PROXY_URL"),
         org_title=os.getenv("ORG_TITLE", "").strip() or "Посещаемость групп",
+        markers_group_id=_optional_int("MARKERS_GROUP_ID"),
+        markers_export_interval_minutes=max(0, _int("MARKERS_EXPORT_INTERVAL_MINUTES", 10)),
+        telegram_backup_root=Path(os.getenv("TELEGRAM_BACKUP_ROOT", "").strip() or str(PROJECT_ROOT)),
     )

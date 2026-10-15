@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -12,10 +12,52 @@ from config import Config
 from database.database import Database
 from database.queries import Repo
 from services.alerts import format_alert, notify_alert
-from utils.telegram import bytes_file
-from utils.time import now_utc, parse_iso, to_iso
+from services.group_export import KEY_LAST_ERROR, publish_markers_export
+from utils.time import now_utc, to_iso
 
 logger = logging.getLogger(__name__)
+
+_TELEGRAM_BACKUP_START_DELAY = timedelta(seconds=20)
+_TELEGRAM_BACKUP_RETRY = timedelta(minutes=15)
+
+
+def reschedule_telegram_backup(
+    scheduler: AsyncIOScheduler,
+    bot: Bot,
+    db: Database,
+    config: Config,
+    last_sent: datetime | None,
+) -> None:
+    if config.telegram_backup_interval_minutes <= 0:
+        try:
+            scheduler.remove_job("telegram_backup")
+        except Exception:
+            pass
+        return
+    from services.telegram_backup import next_telegram_backup_at
+
+    when = next_telegram_backup_at(last_sent, config.telegram_backup_interval_minutes)
+    _schedule_telegram_backup_at(scheduler, bot, db, config, when)
+
+
+def _schedule_telegram_backup_at(
+    scheduler: AsyncIOScheduler,
+    bot: Bot,
+    db: Database,
+    config: Config,
+    when: datetime,
+) -> None:
+    grace = max(3600, config.telegram_backup_interval_minutes * 60)
+    scheduler.add_job(
+        telegram_backup_job,
+        "date",
+        run_date=when,
+        id="telegram_backup",
+        replace_existing=True,
+        kwargs={"scheduler": scheduler, "db": db, "bot": bot, "config": config},
+        misfire_grace_time=grace,
+        next_run_time=when,
+    )
 
 
 def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot, repo: Repo, db: Database, config: Config) -> None:
@@ -29,17 +71,25 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot, repo: Repo, db: Datab
         max_instances=1,
         coalesce=True,
     )
-    if config.telegram_backup_interval_hours > 0:
+    if config.telegram_backup_interval_minutes > 0:
+        _schedule_telegram_backup_at(
+            scheduler,
+            bot,
+            db,
+            config,
+            now_utc() + _TELEGRAM_BACKUP_START_DELAY,
+        )
+    if config.markers_export_interval_minutes > 0:
         scheduler.add_job(
-            telegram_backup_job,
+            markers_export_job,
             "interval",
-            minutes=30,
-            id="telegram_backup",
+            minutes=config.markers_export_interval_minutes,
+            id="markers_export",
             replace_existing=True,
-            kwargs={"db": db, "bot": bot, "config": config},
+            kwargs={"repo": repo, "bot": bot, "config": config},
             max_instances=1,
             coalesce=True,
-            next_run_time=now_utc() + timedelta(seconds=20),
+            next_run_time=now_utc() + timedelta(seconds=40),
         )
     scheduler.add_job(
         cleanup_job,
@@ -62,31 +112,61 @@ async def backup_job(db: Database, bot: Bot, config: Config) -> None:
         await notify_alert(bot, config, format_alert("backup", "Не удалось сделать бэкап на диск", exc=exc))
 
 
-async def send_db_snapshot(db: Database, bot: Bot, config: Config, chat_id: int, *, silent: bool) -> None:
-    path = await db.backup(prefix="telegram")
-    data = path.read_bytes()
-    stamp = now_utc().strftime("%Y-%m-%d_%H-%M")
-    await bot.send_document(
-        chat_id,
-        bytes_file(data, f"attendance-backup_{stamp}.sqlite3"),
-        caption=f"Копия базы данных, {stamp} UTC",
-        disable_notification=silent,
+async def telegram_backup_job(scheduler: AsyncIOScheduler, db: Database, bot: Bot, config: Config) -> None:
+    from services.telegram_backup import (
+        last_telegram_backup_at,
+        next_telegram_backup_at,
+        send_telegram_backup,
+        telegram_backup_chat,
+        telegram_backup_due,
     )
-    await db.set_system("last_telegram_backup_at", to_iso(now_utc()))
 
-
-async def telegram_backup_job(db: Database, bot: Bot, config: Config) -> None:
+    interval = config.telegram_backup_interval_minutes
     try:
-        last_raw = await db.get_system("last_telegram_backup_at")
-        if last_raw:
-            last = parse_iso(last_raw)
-            if now_utc() - last < timedelta(hours=config.telegram_backup_interval_hours):
-                return
-        await send_db_snapshot(db, bot, config, config.superadmin_id, silent=True)
-        logger.info("Telegram backup sent")
+        last = await last_telegram_backup_at(db)
+        if not telegram_backup_due(last, interval):
+            when = next_telegram_backup_at(last, interval)
+            logger.info("Telegram backup not due, next at %s", when.isoformat())
+        else:
+            chat_id, _title = await telegram_backup_chat(db)
+            if chat_id is None:
+                logger.info("Telegram backup skipped: group is not bound")
+            else:
+                sent = await send_telegram_backup(db, bot, config, silent=True)
+                if sent is None:
+                    logger.info("Telegram backup skipped: no changes")
+                else:
+                    logger.info("Telegram backup sent")
+            when = now_utc() + timedelta(minutes=max(interval, 1))
+        _schedule_telegram_backup_at(scheduler, bot, db, config, when)
     except Exception as exc:
         logger.exception("Telegram backup failed")
-        await notify_alert(bot, config, format_alert("telegram_backup", "Не удалось отправить бэкап в Telegram", exc=exc))
+        await notify_alert(
+            bot,
+            config,
+            format_alert("telegram_backup", "Не удалось сделать или отправить бэкап в Telegram", exc=exc),
+        )
+        _schedule_telegram_backup_at(scheduler, bot, db, config, now_utc() + _TELEGRAM_BACKUP_RETRY)
+
+
+async def markers_export_job(repo: Repo, bot: Bot, config: Config) -> None:
+    try:
+        result = await publish_markers_export(bot, repo, config, silent=True)
+    except Exception as exc:
+        logger.exception("Markers export failed")
+        signature = f"{type(exc).__name__}: {exc}"[:500]
+        last = await repo.db.get_system(KEY_LAST_ERROR)
+        if last == signature:
+            return
+        await repo.db.set_system(KEY_LAST_ERROR, signature)
+        await notify_alert(
+            bot,
+            config,
+            format_alert("markers_export", "Не удалось отправить таблицу посещаемости в группу", exc=exc),
+        )
+        return
+    if result == "sent":
+        logger.info("Attendance table sent to the markers group")
 
 
 async def cleanup_job(repo: Repo) -> None:

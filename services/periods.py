@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-from database.models import Event
+from database.models import Event, Student
 from utils.formatting import truncate
 from utils.time import month_title
 
@@ -92,6 +92,23 @@ def period_button_label(period: Period) -> str:
     """Button text must stay within Telegram's 64-character limit."""
     suffix = f" · {len(period.events)} зан."
     return truncate(period.title, 64 - len(suffix)) + suffix
+
+
+def students_for_period(students: list[Student], period: Period) -> list[Student]:
+    """Students who overlap the period. An open period without events keeps active students."""
+    start, end = period.start_date, period.end_date
+    result: list[Student] = []
+    for student in students:
+        if start is None or end is None:
+            if student.is_active:
+                result.append(student)
+            continue
+        if not student.is_active and (student.left_date is None or student.left_date < start):
+            continue
+        if student.joined_date > end:
+            continue
+        result.append(student)
+    return result
 
 
 def period_range_text(period: Period) -> str:

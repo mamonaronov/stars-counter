@@ -21,7 +21,7 @@ def make_config(tmp_path: Path) -> Config:
         backup_path=tmp_path / "backups",
         backup_interval_hours=6,
         backup_keep=3,
-        telegram_backup_interval_hours=0,
+        telegram_backup_interval_minutes=0,
         log_level="WARNING",
         telegram_proxy_url=None,
     )

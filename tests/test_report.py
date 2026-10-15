@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from io import BytesIO
 
 from openpyxl import load_workbook
 
-from services.report import build_report_xlsx
+from services.report import PeriodSection, build_periods_xlsx, build_report_xlsx
 from services.stats import compute_group_stats
 from tests.conftest import event, excuse, student
 
@@ -75,3 +76,31 @@ def test_report_percent_values():
     details = wb["Детали"]
     assert details.cell(row=5, column=2).value == "Антонов Антон"
     assert details.cell(row=5, column=8).value == "+"
+
+
+def test_archive_has_a_sheet_pair_per_period():
+    students = [student(1, "Антонов Антон")]
+    closed_events = [event(1, "2026-09-01", closes=True)]
+    open_events = [event(2, "2026-10-02", title="Семинар")]
+    closed = compute_group_stats(students, closed_events, {1: {1}}, [])
+    opened = compute_group_stats(students, open_events, {}, [])
+    data = build_periods_xlsx(
+        org_title="Посещаемость групп",
+        sections=[
+            PeriodSection("Сентябрь: 2026", date(2026, 9, 1), date(2026, 9, 1), closed, closed_events),
+            PeriodSection(
+                "Текущий: Октябрь 2026",
+                date(2026, 10, 2),
+                date(2026, 10, 2),
+                opened,
+                open_events,
+                interim=True,
+            ),
+        ],
+    )
+    wb = load_workbook(BytesIO(data))
+    assert len(wb.sheetnames) == 4
+    assert all(re.search(r"[\\*?:/\[\]]", name) is None for name in wb.sheetnames)
+    assert "промежуточный" in wb[wb.sheetnames[2]]["A1"].value
+    assert wb[wb.sheetnames[1]].cell(row=5, column=8).value == "+"
+    assert wb[wb.sheetnames[3]].cell(row=4, column=8).value.endswith("Семинар")

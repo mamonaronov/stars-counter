@@ -275,7 +275,8 @@ async def test_full_flow(h: Harness):
     await h.click(SUPER, "s:srv")
     assert "Версия БД" in h.last_text()
     await h.press(SUPER, "Прислать бэкап")
-    assert h.session.last("SendDocument").document.filename.startswith("attendance-backup_")
+    name = h.session.last("SendDocument").document.filename
+    assert name.startswith("stars-counter-backup_") and name.endswith(".tgz")
 
 
 async def test_lower_role_cannot_remove_or_unlink_higher(h: Harness):

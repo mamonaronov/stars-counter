@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
 
@@ -31,6 +33,17 @@ _MATRIX_MARK = {
     STATUS_FREE_SKIPPED: "",
     STATUS_NOT_COUNTED: "·",
 }
+_BAD_SHEET = re.compile(r"[\\*?:/\[\]]")
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodSection:
+    period_title: str
+    period_from: date | None
+    period_to: date | None
+    stats: list[StudentStats]
+    events: list[Event]
+    interim: bool = False
 
 
 def _percent_cell(item: StudentStats):
@@ -42,6 +55,20 @@ def _percent_cell(item: StudentStats):
 
 def _fmt(day: date | None) -> str:
     return day.strftime("%d.%m.%Y") if day else "—"
+
+
+def _sheet_name(raw: str, used: set[str]) -> str:
+    cleaned = _BAD_SHEET.sub(" ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" '") or "Лист"
+    cleaned = cleaned[:31]
+    candidate = cleaned
+    number = 2
+    while candidate.casefold() in used:
+        suffix = f" {number}"
+        candidate = f"{cleaned[: 31 - len(suffix)]}{suffix}".strip()
+        number += 1
+    used.add(candidate.casefold())
+    return candidate
 
 
 def build_report_xlsx(
@@ -57,7 +84,66 @@ def build_report_xlsx(
     wb = Workbook()
     ws = wb.active
     ws.title = "Отчёт"
+    _write_ranking(
+        ws,
+        org_title=org_title,
+        period_from=period_from,
+        period_to=period_to,
+        stats=stats,
+        interim=interim,
+    )
+    _details_sheet(wb, "Детали", period_title, stats, events)
+    return _save(wb)
 
+
+def build_periods_xlsx(*, org_title: str, sections: list[PeriodSection]) -> bytes:
+    """One ranking sheet and one matrix sheet for every period, in chronological order."""
+    if not sections:
+        raise ValueError("no sections")
+    wb = Workbook()
+    used: set[str] = set()
+    first = True
+    for index, section in enumerate(sections, start=1):
+        report_name = _sheet_name(f"{index}. {section.period_title}", used)
+        if first:
+            ws = wb.active
+            ws.title = report_name
+            first = False
+        else:
+            ws = wb.create_sheet(report_name)
+        _write_ranking(
+            ws,
+            org_title=org_title,
+            period_from=section.period_from,
+            period_to=section.period_to,
+            stats=section.stats,
+            interim=section.interim,
+        )
+        _details_sheet(
+            wb,
+            _sheet_name(f"{index}. Детали", used),
+            section.period_title,
+            section.stats,
+            section.events,
+        )
+    return _save(wb)
+
+
+def _save(wb: Workbook) -> bytes:
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _write_ranking(
+    ws,
+    *,
+    org_title: str,
+    period_from: date | None,
+    period_to: date | None,
+    stats: list[StudentStats],
+    interim: bool,
+) -> None:
     heading = f"{org_title} за период" + (" (промежуточный)" if interim else "")
     ws.merge_cells("A1:C1")
     ws["A1"] = heading
@@ -110,15 +196,15 @@ def build_report_xlsx(
     ws.freeze_panes = "A4"
     ws.auto_filter.ref = f"A3:C{max(last_row, 3)}"
 
-    _details_sheet(wb, period_title, stats, events)
 
-    buffer = BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
-
-
-def _details_sheet(wb: Workbook, period_title: str, stats: list[StudentStats], events: list[Event]) -> None:
-    ws = wb.create_sheet("Детали")
+def _details_sheet(
+    wb: Workbook,
+    sheet_name: str,
+    period_title: str,
+    stats: list[StudentStats],
+    events: list[Event],
+) -> None:
+    ws = wb.create_sheet(sheet_name)
     ws["A1"] = period_title
     ws["A1"].font = Font(bold=True, size=12)
     ws["A2"] = "+ был, у — уважительная причина, пусто — пропуск, · — не учитывается. Свободные занятия помечены (св.)"

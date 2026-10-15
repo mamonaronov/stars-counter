@@ -10,12 +10,11 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Config
-from database.models import Student
 from database.queries import Repo
 from handlers.common import event_title_line, load_periods, period_header, require_level, respond
 from keyboards.main import btn, cancel_kb, confirm_kb, nav_row, periods_kb
 from services.audit import audit
-from services.periods import OPEN_KEY, Period, find_period, period_index
+from services.periods import OPEN_KEY, Period, find_period, period_index, students_for_period
 from services.report import build_report_xlsx
 from services.roles import Actor
 from services.stats import StudentStats, compute_group_stats
@@ -30,24 +29,8 @@ router = Router(name="months")
 # ---------------------------------------------------------------- helpers
 
 
-def _students_for_period(students: list[Student], period: Period) -> list[Student]:
-    start, end = period.start_date, period.end_date
-    result: list[Student] = []
-    for student in students:
-        if start is None or end is None:
-            if student.is_active:
-                result.append(student)
-            continue
-        if not student.is_active and (student.left_date is None or student.left_date < start):
-            continue
-        if student.joined_date > end:
-            continue
-        result.append(student)
-    return result
-
-
 async def period_group_stats(repo: Repo, period: Period) -> list[StudentStats]:
-    students = _students_for_period(await repo.list_students(active_only=False), period)
+    students = students_for_period(await repo.list_students(active_only=False), period)
     attendance = await repo.attendance_all()
     excuses = await repo.list_excuses(active_only=True)
     return compute_group_stats(students, period.events, attendance, excuses)

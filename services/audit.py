@@ -44,7 +44,12 @@ ACTION_TITLES: dict[str, str] = {
     "request.approve": "одобрил запрос",
     "request.reject": "отклонил запрос",
     "report.export": "выгрузил отчёт",
+    "export.markers": "отправил таблицу посещаемости в группу",
+    "export.bind": "подключил группу для таблицы посещаемости",
+    "export.unbind": "отключил группу для таблицы посещаемости",
     "backup.manual": "сделал бэкап",
+    "backup.bind": "подключил группу для бэкапов",
+    "backup.unbind": "отключил группу для бэкапов",
 }
 
 
