@@ -125,9 +125,17 @@ async def month_summary(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
         lines.append("Студентов нет.")
     for index, item in enumerate(stats, start=1):
         lines.append(f"{index}. {esc(item.student.full_name)} — <b>{percent_text(item.percent)}</b>")
+    if len("\n".join(lines)) > 3900:
+        kept: list[str] = []
+        size = 0
+        for line in lines:
+            if size + len(line) + 1 > 3800:
+                kept.append("… список обрезан, полный есть в отчёте Excel")
+                break
+            kept.append(line)
+            size += len(line) + 1
+        lines = kept
     text = "\n".join(lines)
-    if len(text) > 3900:
-        text = text[:3900] + "\n…"
     b = InlineKeyboardBuilder()
     b.row(btn("📑 Отчёт Excel", f"monx:{period.key}"))
     b.row(*nav_row(f"mon:{period.key}"))
@@ -217,9 +225,16 @@ async def month_set_closer(cb: CallbackQuery, repo: Repo, config: Config, actor:
         await answer_callback(cb, "Занятие не найдено", show_alert=True)
         return
     periods = await load_periods(repo, config)
-    period = find_period(periods, key)
+    index = period_index(periods, key)
+    period = periods[index] if index >= 0 else None
     if period is None:
         await answer_callback(cb, "Период не найден", show_alert=True)
+        return
+    allowed = {item.id for item in period.events}
+    if index + 1 < len(periods):
+        allowed.update(item.id for item in periods[index + 1].events)
+    if event.id not in allowed:
+        await answer_callback(cb, "Это занятие из другого месяца. Конец можно перенести только на занятие этого или следующего месяца.", show_alert=True)
         return
     if period.closer is not None and period.closer.id == event.id:
         await show_month_card(cb, repo, config, key, notice="Это занятие уже последнее")
@@ -260,6 +275,9 @@ async def month_rename_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
 
 @router.message(MonthSG.rename, F.text)
 async def month_rename(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    if not await require_level(message, actor):
+        await state.clear()
+        return
     title = " ".join((message.text or "").split())[:60]
     data = await state.get_data()
     key = str(data.get("rename_key"))

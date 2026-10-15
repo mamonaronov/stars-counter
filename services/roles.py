@@ -104,8 +104,13 @@ class Actor:
         return str(self.telegram_id)
 
     @property
+    def is_linked(self) -> bool:
+        """Telegram is bound to a student card, including a removed one."""
+        return self.student is not None and self.student.is_verified
+
+    @property
     def is_verified_student(self) -> bool:
-        return self.student is not None and self.student.is_active
+        return self.is_linked and self.student is not None and self.student.is_active
 
     @property
     def can_mark(self) -> bool:

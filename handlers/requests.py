@@ -13,7 +13,7 @@ from database.queries import Repo
 from handlers.common import event_title_line, load_periods, require_level, require_verified, respond, show_main
 from keyboards.main import btn, cancel_kb, nav_row, pager_row
 from services.audit import audit
-from services.periods import find_period
+from services.periods import find_period, period_button_label
 from services.roles import Actor
 from states import RejectSG, RequestSG
 from utils.callbacks import SEC_NEW_REQUEST, SEC_REQUESTS
@@ -51,7 +51,7 @@ async def _show_request_periods(cb: CallbackQuery, periods, page: int) -> None:
     chunk, page, pages = _paged(ordered, page, PERIOD_PAGE)
     b = InlineKeyboardBuilder()
     for period in chunk:
-        b.row(btn(f"{period.title} · {len(period.events)} зан.", f"rqp:{period.key}"))
+        b.row(btn(period_button_label(period), f"rqp:{period.key}"))
     if pages > 1:
         b.row(*pager_row("rqpg", page, pages))
     b.row(*nav_row())
@@ -146,8 +146,20 @@ async def new_request_text(message: Message, state: FSMContext, repo: Repo, conf
     data = await state.get_data()
     await state.clear()
     event = await repo.get_event(int(data.get("req_event_id") or 0))
-    if event is None or actor.student is None:
+    if event is None or event.deleted_at or actor.student is None:
         await message.answer("Занятие не найдено.")
+        return
+    if not actor.student.counts_on(event.day):
+        await message.answer("Это занятие вам не учитывается, запрос не отправлен.")
+        await show_main(message, actor, config, repo)
+        return
+    if await repo.is_present(event.id, actor.student.id):
+        await message.answer("Вас уже отметили на этом занятии.")
+        await show_main(message, actor, config, repo)
+        return
+    if await repo.has_open_request(actor.student.id, event.id):
+        await message.answer("По этому занятию уже есть необработанный запрос.")
+        await show_main(message, actor, config, repo)
         return
     req = await repo.create_request(actor.student.id, event.id, text)
     await audit(repo, actor, "request.create", entity_type="request", entity_id=req.id, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}", текст=text)
@@ -191,21 +203,29 @@ async def _request_text(repo: Repo, config: Config, req: Request) -> str:
     return "\n".join(lines)
 
 
-async def show_requests_list(target: CallbackQuery | Message, repo: Repo, *, resolved: bool = False) -> None:
+REQUEST_PAGE = 8
+
+
+async def show_requests_list(target: CallbackQuery | Message, repo: Repo, *, resolved: bool = False, page: int = 0) -> None:
     if resolved:
-        items = [r for r in await repo.list_requests(status=None, limit=60) if r.status != "open"][:15]
+        items = [r for r in await repo.list_requests(status=None, limit=200) if r.status != "open"]
         title = "📁 <b>Обработанные запросы</b>"
+        page_prefix = "rqhp"
     else:
         items = await repo.list_requests(status="open")
         title = "📨 <b>Запросы студентов</b>"
+        page_prefix = "rqlp"
+    chunk, page, pages = _paged(items, page, REQUEST_PAGE)
     b = InlineKeyboardBuilder()
-    for req in items:
+    for req in chunk:
         student = await repo.get_student(req.student_id)
         event = await repo.get_event(req.event_id)
-        name = student.full_name.split()[0] if student else "?"
-        ev = f"{event.day.strftime('%d.%m')} {truncate(event.title, 16)}" if event else "?"
+        name = truncate(student.full_name, 22) if student else "?"
+        ev = f"{event.day.strftime('%d.%m')} {truncate(event.title, 14)}" if event else "?"
         icon = {"approved": "✅", "rejected": "❌"}.get(req.status, "•")
         b.row(btn(f"{icon} {name} · {ev}", f"rq:{req.id}"))
+    if pages > 1:
+        b.row(*pager_row(page_prefix, page, pages))
     if resolved:
         b.row(btn("📨 Открытые", SEC_REQUESTS))
     else:
@@ -229,6 +249,20 @@ async def resolved_requests(cb: CallbackQuery, state: FSMContext, repo: Repo, ac
         return
     await state.clear()
     await show_requests_list(cb, repo, resolved=True)
+
+
+@router.callback_query(F.data.startswith("rqlp:"))
+async def requests_page(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    await show_requests_list(cb, repo, page=int(cb.data.split(":", 1)[1]))
+
+
+@router.callback_query(F.data.startswith("rqhp:"))
+async def resolved_requests_page(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    await show_requests_list(cb, repo, resolved=True, page=int(cb.data.split(":", 1)[1]))
 
 
 @router.callback_query(F.data.startswith("rq:"))
@@ -261,10 +295,16 @@ async def approve_request(cb: CallbackQuery, repo: Repo, config: Config, bot: Bo
     if student is None or event is None or event.deleted_at:
         await answer_callback(cb, "Студент или занятие не найдены.", show_alert=True)
         return
+    if not student.counts_on(event.day):
+        await answer_callback(cb, "Студент не учитывается на эту дату, отметка не войдёт в процент. Запрос не закрыт.", show_alert=True)
+        return
+    req = await repo.resolve_request(req.id, "approved", actor.telegram_id, None)
+    if req is None:
+        await answer_callback(cb, "Запрос уже обработан.", show_alert=True)
+        return
     changed = await repo.set_presence(event.id, student.id, True, actor.telegram_id)
     if changed:
         await audit(repo, actor, "attendance.mark", entity_type="event", entity_id=event.id, студент=student.full_name, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}", по_запросу=req.id)
-    req = await repo.resolve_request(req.id, "approved", actor.telegram_id, None)
     await audit(repo, actor, "request.approve", entity_type="request", entity_id=req.id, студент=student.full_name, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}")
     if student.telegram_id:
         await safe_send_message(bot, student.telegram_id, f"✅ Ваш запрос одобрен: вы отмечены на занятии\n{event_title_line(event)}")
@@ -288,6 +328,9 @@ async def reject_request_start(cb: CallbackQuery, state: FSMContext, repo: Repo,
 
 
 async def _reject(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, bot: Bot, actor: Actor, comment: str | None) -> None:
+    if not await require_level(target, actor):
+        await state.clear()
+        return
     data = await state.get_data()
     await state.clear()
     req = await repo.get_request(int(data.get("reject_id") or 0))
@@ -297,6 +340,9 @@ async def _reject(target: CallbackQuery | Message, state: FSMContext, repo: Repo
     student = await repo.get_student(req.student_id)
     event = await repo.get_event(req.event_id)
     req = await repo.resolve_request(req.id, "rejected", actor.telegram_id, comment)
+    if req is None:
+        await respond(target, "Запрос уже обработан.", _back_kb())
+        return
     await audit(repo, actor, "request.reject", entity_type="request", entity_id=req.id, студент=student.full_name if student else None, комментарий=comment)
     if student and student.telegram_id:
         text = "❌ Ваш запрос отклонён"

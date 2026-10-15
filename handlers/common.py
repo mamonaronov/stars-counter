@@ -35,6 +35,8 @@ def menu_text(actor: Actor | None, config: Config) -> str:
         lines.append("Вы: <b>суперадмин</b>")
         if actor.student:
             lines.append(f"Студент: {esc(actor.student.full_name)}")
+    elif actor.is_linked and actor.student is not None and not actor.student.is_active:
+        lines.append(f"Вы: <b>{esc(actor.student.full_name)}</b> · удалены из группы. Свою посещаемость можно посмотреть.")
     elif actor.is_verified_student:
         lines.append(f"Вы: <b>{esc(actor.student.full_name)}</b> · {esc(actor.role_title)}")
     else:
@@ -85,7 +87,7 @@ async def require_level(event: CallbackQuery | Message, actor: Actor | None, lev
 
 
 async def require_verified(event: CallbackQuery | Message, actor: Actor | None) -> bool:
-    if actor is None or not actor.is_verified_student:
+    if actor is None or not actor.is_linked:
         await deny(event, "Эта функция доступна только верифицированным студентам.")
         return False
     return True
@@ -190,7 +192,15 @@ def student_line(student: Student, today: date) -> str:
     return f"👤 <b>{esc(student.full_name)}</b> · {course}"
 
 
-def stats_text(stats: StudentStats, period: Period, today: date, *, show_events: bool = True) -> str:
+def _is_event_line(line: str) -> bool:
+    for icon in STATUS_ICON.values():
+        rest = line[len(icon) + 1 :] if line.startswith(icon + " ") else ""
+        if rest[:1].isdigit():
+            return True
+    return False
+
+
+def stats_text(stats: StudentStats, period: Period, today: date, *, show_events: bool = True, reveal_excuses: bool = False) -> str:
     lines = [student_line(stats.student, today), period_header(period), ""]
     lines.append(f"Процент посещаемости: <b>{percent_text(stats.percent)}</b>")
     lines.append(
@@ -207,12 +217,28 @@ def stats_text(stats: StudentStats, period: Period, today: date, *, show_events:
             kind = "" if event.is_mandatory else " (св.)"
             time = f" {event.start_time}" if event.start_time else ""
             suffix = ""
-            if row.status == STATUS_EXCUSED and row.excuse is not None:
+            if reveal_excuses and row.status == STATUS_EXCUSED and row.excuse is not None:
                 suffix = f" — {EXCUSE_TITLES.get(row.excuse.kind, row.excuse.kind)}"
             lines.append(f"{STATUS_ICON[row.status]} {event.day.strftime('%d.%m')}{time} {esc(event.title)}{kind}{suffix}")
         lines.append("")
         lines.append("✅ был · ❌ пропуск · 🩺 уважительная причина · ➖ свободное, не был · ⚪ не учитывается")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) <= 3900:
+        return text
+    hidden = 0
+    while len(text) > 3900 and stats.rows:
+        # Drop event lines from the end, but keep the percent block above them.
+        event_lines = [i for i, line in enumerate(lines) if _is_event_line(line)]
+        if not event_lines:
+            break
+        lines.pop(event_lines[-1])
+        hidden += 1
+        text = "\n".join(lines)
+    if hidden:
+        text += f"\n… и ещё {hidden} занятий не влезло в сообщение."
+    if len(text) > 4000:
+        text = text[:3990].rsplit("\n", 1)[0] + "\n…"
+    return text
 
 
 async def student_period_stats(repo: Repo, student: Student, period: Period) -> StudentStats:

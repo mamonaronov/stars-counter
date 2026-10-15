@@ -19,9 +19,10 @@ from handlers.common import (
     student_period_stats,
 )
 from keyboards.main import btn, nav_row
-from services.periods import find_period
+from services.periods import find_period, period_button_label
 from services.roles import Actor
 from utils.callbacks import NAV_MAIN, SEC_ATTENDANCE, SEC_MY
+from utils.formatting import truncate
 from utils.telegram import answer_callback
 from utils.time import local_today
 
@@ -39,6 +40,7 @@ async def open_attendance(cb: CallbackQuery, state: FSMContext, repo: Repo) -> N
         ctx=PICK_CTX,
         title="📊 <b>Посещаемость</b>\nВыберите студента:",
         back=NAV_MAIN,
+        include_removed=True,
     )
 
 
@@ -52,7 +54,7 @@ async def show_periods_for_student(cb: CallbackQuery, state: FSMContext, repo: R
     today = local_today(config.timezone)
     b = InlineKeyboardBuilder()
     for period in reversed(periods):
-        b.row(btn(f"{period.title} · {len(period.events)} зан.", f"pa:{student.id}:{period.key}"))
+        b.row(btn(period_button_label(period), f"pa:{student.id}:{period.key}"))
     b.row(*nav_row(SEC_ATTENDANCE))
     await respond(cb, f"{student_line(student, today)}\n\nВыберите месяц:", b.as_markup())
 
@@ -72,7 +74,7 @@ async def open_my(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Conf
 
 
 @router.callback_query(F.data.startswith("pa:"))
-async def show_period_stats(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config) -> None:
+async def show_period_stats(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
     _, raw_id, key = cb.data.split(":", 2)
     student = await repo.get_student(int(raw_id))
     if student is None:
@@ -90,11 +92,11 @@ async def show_period_stats(cb: CallbackQuery, state: FSMContext, repo: Repo, co
     others = [p for p in reversed(periods) if p.key != period.key]
     row = []
     for other in others[:6]:
-        row.append(btn(other.title, f"pa:{student.id}:{other.key}"))
+        row.append(btn(truncate(other.title, 40), f"pa:{student.id}:{other.key}"))
         if len(row) == 2:
             b.row(*row)
             row = []
     if row:
         b.row(*row)
     b.row(btn("📆 Все месяцы", f"pk:{PICK_CTX}:{student.id}"), *nav_row(SEC_ATTENDANCE))
-    await respond(cb, stats_text(stats, period, today), b.as_markup())
+    await respond(cb, stats_text(stats, period, today, reveal_excuses=bool(actor and actor.can_mark)), b.as_markup())

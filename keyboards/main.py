@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database.models import Event, EventTemplate, Student
-from services.periods import Period
+from services.periods import Period, period_button_label
 from services.roles import LEVEL_CHIEF_MARKER, LEVEL_MARKER, LEVEL_SUPERADMIN, Actor
 from utils.callbacks import (
     NAV_CANCEL,
@@ -30,7 +30,7 @@ from utils.callbacks import (
     SEC_TEMPLATES,
     SEC_VERIFY,
 )
-from utils.formatting import short_name, truncate
+from utils.formatting import truncate
 from utils.time import MONTHS_RU_NOM, WEEKDAYS_RU, days_in_month, month_shift
 
 PICK_PAGE = 16
@@ -38,7 +38,8 @@ LIST_PAGE = 10
 
 
 def btn(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
+    # Telegram rejects the whole keyboard when any label is longer than 64 characters.
+    return InlineKeyboardButton(text=truncate(text, 64), callback_data=data)
 
 
 def nav_row(back: str | None = None, *, menu: bool = True, back_text: str = "⬅️ Назад") -> list[InlineKeyboardButton]:
@@ -73,7 +74,7 @@ def confirm_kb(yes: str, no: str, *, yes_text: str = "✅ Подтвердить
 def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     level = actor.level if actor else 0
-    if actor is not None and actor.is_verified_student:
+    if actor is not None and actor.is_linked:
         b.row(btn("👤 Моя посещаемость", SEC_MY), btn("✉️ Запрос отмечающему", SEC_NEW_REQUEST))
     b.row(btn("📊 Посещаемость студентов", SEC_ATTENDANCE))
     if level >= LEVEL_MARKER:
@@ -107,7 +108,10 @@ def students_picker_kb(
     chunk = students[page * PICK_PAGE : (page + 1) * PICK_PAGE]
     row: list[InlineKeyboardButton] = []
     for student in chunk:
-        row.append(btn(truncate(short_name(student.full_name), 24), f"pk:{ctx}:{student.id}"))
+        name = truncate(student.full_name, 22 if not student.is_active else 32)
+        if not student.is_active:
+            name += " · удалён"
+        row.append(btn(name, f"pk:{ctx}:{student.id}"))
         if len(row) == 2:
             b.row(*row)
             row = []
@@ -129,9 +133,7 @@ def periods_kb(periods: list[Period], prefix: str, *, back: str | None = None, n
     b = InlineKeyboardBuilder()
     ordered = list(reversed(periods)) if newest_first else list(periods)
     for period in ordered:
-        n = len(period.events)
-        label = f"{period.title} · {n} зан." if period.closed else f"{period.title} · {n} зан."
-        b.row(btn(label, f"{prefix}:{period.key}"))
+        b.row(btn(period_button_label(period), f"{prefix}:{period.key}"))
     b.row(*nav_row(back))
     return b.as_markup()
 
@@ -154,7 +156,7 @@ def marking_kb(event: Event, students: list[Student], present: set[int], *, back
                 mark = "· "
             else:
                 mark = ""
-            row.append(btn(f"{mark}{truncate(short_name(student.full_name), 20)}", f"att:{event.id}:{student.id}"))
+            row.append(btn(f"{mark}{truncate(student.full_name, 30)}", f"att:{event.id}:{student.id}"))
             if len(row) == 2:
                 b.row(*row)
                 row = []

@@ -137,9 +137,9 @@ class Repo:
             ),
         )
 
-    async def find_student_by_name(self, full_name: str) -> Student | None:
+    async def find_student_by_name(self, full_name: str, *, active_only: bool = True) -> Student | None:
         needle = " ".join(full_name.split()).casefold()
-        for student in await self.list_students(active_only=True):
+        for student in await self.list_students(active_only=active_only):
             if " ".join(student.full_name.split()).casefold() == needle:
                 return student
         return None
@@ -418,10 +418,19 @@ class Repo:
         return row is not None
 
     async def resolve_request(self, request_id: int, status: str, resolved_by: int, comment: str | None) -> Request | None:
-        await self._execute(
-            "UPDATE requests SET status = ?, resolved_by = ?, resolved_at = ?, resolution_comment = ? WHERE id = ?",
+        """Close an open request. Returns None when another marker already resolved it."""
+        async with self.conn.execute(
+            """
+            UPDATE requests
+            SET status = ?, resolved_by = ?, resolved_at = ?, resolution_comment = ?
+            WHERE id = ? AND status = 'open'
+            """,
             (status, resolved_by, to_iso(now_utc()), comment, request_id),
-        )
+        ) as cur:
+            changed = cur.rowcount
+        await self.conn.commit()
+        if not changed:
+            return None
         return await self.get_request(request_id)
 
     # ------------------------------------------------------------------ audit

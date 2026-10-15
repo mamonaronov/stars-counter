@@ -18,7 +18,7 @@ from services.audit import audit
 from services.roles import Actor
 from states import ExcuseSG
 from utils.callbacks import SEC_EXCUSES
-from utils.formatting import esc, short_name
+from utils.formatting import esc, truncate
 from utils.telegram import answer_callback
 from utils.time import format_dt_iso, local_today, parse_date_text
 
@@ -44,7 +44,7 @@ async def show_excuses(target: CallbackQuery | Message, repo: Repo, page: int = 
     b = InlineKeyboardBuilder()
     for excuse in items[page * EXCUSE_PAGE : (page + 1) * EXCUSE_PAGE]:
         student = await repo.get_student(excuse.student_id)
-        name = short_name(student.full_name) if student else "?"
+        name = truncate(student.full_name, 28) if student else "?"
         b.row(btn(f"{KIND_ICON.get(excuse.kind, '•')} {name} · {_range(excuse)}", f"exc:{excuse.id}"))
     if pages > 1:
         b.row(*pager_row("excp", page, pages))
@@ -164,6 +164,9 @@ async def add_excuse_to_text(message: Message, state: FSMContext, config: Config
 
 
 async def _create(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, comment: str | None) -> None:
+    if not await require_level(target, actor):
+        await state.clear()
+        return
     data = await state.get_data()
     await state.clear()
     excuse = await repo.create_excuse(int(data["exc_student_id"]), data["exc_kind"], data["exc_from"], data["exc_to"], comment, actor.telegram_id)

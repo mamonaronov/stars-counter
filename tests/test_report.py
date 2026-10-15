@@ -34,6 +34,23 @@ def test_report_has_ranking_and_details():
     assert ws["C5"].value == 1.0
 
 
+def test_report_undefined_percent_is_not_zero():
+    students = [student(1, "Антонов Антон")]
+    events = [event(1, "2026-09-03", kind="free")]
+    stats = compute_group_stats(students, events, {1: {1}}, [])
+    assert stats[0].percent is None
+    data = build_report_xlsx(
+        org_title="Посещаемость групп",
+        period_title="Сентябрь 2026",
+        period_from=date(2026, 9, 3),
+        period_to=date(2026, 9, 3),
+        stats=stats,
+        events=events,
+    )
+    wb = load_workbook(BytesIO(data))
+    assert wb["Отчёт"]["C4"].value == "—"
+
+
 def test_report_percent_values():
     students = [student(1, "Антонов Антон"), student(2, "Борисов Борис")]
     events = [event(1, "2026-09-01"), event(2, "2026-09-03", kind="free"), event(3, "2026-09-05")]

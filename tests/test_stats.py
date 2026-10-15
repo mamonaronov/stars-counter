@@ -76,6 +76,22 @@ def test_events_after_left_on_are_not_counted():
     assert stats.percent == 100.0
 
 
+def test_public_stats_hide_excuse_kind():
+    from datetime import date
+
+    from handlers.common import stats_text
+    from services.periods import Period
+
+    s = student()
+    events = [event(1, "2026-09-05")]
+    stats = compute_student_stats(s, events, set(), [excuse(1, "2026-09-01", "2026-09-30")])
+    period = Period(key="1", title="Сентябрь 2026", events=events, closer=events[0])
+    public = stats_text(stats, period, date(2026, 9, 30), reveal_excuses=False)
+    private = stats_text(stats, period, date(2026, 9, 30), reveal_excuses=True)
+    assert "🩺" in public and "больничный" not in public
+    assert "больничный" in private
+
+
 def test_group_stats_sorted_desc():
     a = student(1, "Антонов Антон")
     b = student(2, "Борисов Борис")

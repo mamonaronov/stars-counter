@@ -36,6 +36,11 @@ async def _verify(message: Message, token: str, repo: Repo, config: Config, acto
     if student.telegram_id is not None and student.telegram_id != actor.telegram_id:
         return "К этому студенту уже привязан другой Telegram-аккаунт. Обратитесь к отмечающему."
     if actor.student is not None and actor.student.id != student.id:
+        if not actor.student.is_active:
+            return (
+                f"Ваш Telegram привязан к удалённой карточке «{esc(actor.student.full_name)}». "
+                "Попросите восстановить её: новая карточка не получит старую историю посещений."
+            )
         return (
             f"Ваш аккаунт уже привязан к студенту «{esc(actor.student.full_name)}». "
             "Чтобы перепривязать, обратитесь к отмечающему."
@@ -87,7 +92,7 @@ def help_text(actor: Actor | None) -> str:
         "• Процент = (посещённые обязательные + посещённые свободные + пропуски по уважительной причине) / все обязательные занятия периода. "
         "Свободные занятия, на которые студент не пришёл, не учитываются, поэтому процент может быть выше 100.",
     ]
-    if actor is not None and actor.is_verified_student:
+    if actor is not None and actor.is_linked:
         parts += [
             "• <b>Моя посещаемость</b> — ваша статистика за любой месяц.",
             "• <b>Запрос отмечающему</b> — если вас забыли отметить: выберите занятие и напишите сообщение.",

@@ -119,5 +119,6 @@ def compute_group_stats(
         compute_student_stats(s, events, by_student.get(s.id, set()), excuses_by_student.get(s.id, []))
         for s in students
     ]
-    result.sort(key=lambda item: (-(item.percent_or_zero), item.student.full_name.lower()))
+    # Students with no mandatory events have no percent. They must not sort as 0%.
+    result.sort(key=lambda item: (item.percent is None, -(item.percent or 0.0), item.student.full_name.lower()))
     return result

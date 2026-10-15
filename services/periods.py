@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from database.models import Event
+from utils.formatting import truncate
 from utils.time import month_title
 
 OPEN_KEY = "open"
@@ -85,6 +86,12 @@ def period_index(periods: list[Period], key: str) -> int:
         if period.key == key:
             return index
     return -1
+
+
+def period_button_label(period: Period) -> str:
+    """Button text must stay within Telegram's 64-character limit."""
+    suffix = f" · {len(period.events)} зан."
+    return truncate(period.title, 64 - len(suffix)) + suffix
 
 
 def period_range_text(period: Period) -> str:

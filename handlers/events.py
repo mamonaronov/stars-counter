@@ -29,7 +29,7 @@ from keyboards.main import (
     time_kb,
 )
 from services.audit import audit, format_audit_entry
-from services.periods import period_of_event
+from services.periods import period_of_event, period_range_text
 from services.roles import Actor
 from states import EditEventSG, NewEventSG
 from utils.callbacks import NAV_MAIN, SEC_EVENTS, SEC_NEW_EVENT
@@ -84,6 +84,8 @@ async def show_event_card(target: CallbackQuery | Message, repo: Repo, config: C
         await answer_callback(target, notice)
         await safe_edit(target.message, text, markup)
     else:
+        if notice:
+            text = f"<b>{esc(notice)}</b>\n\n{text}"
         await target.answer(text, reply_markup=markup)
 
 
@@ -235,6 +237,9 @@ async def new_event_kind(cb: CallbackQuery, state: FSMContext, repo: Repo, confi
 
 
 async def _create_event(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, *, title: str, kind: str) -> None:
+    if not await require_level(target, actor):
+        await state.clear()
+        return
     data = await state.get_data()
     event = await repo.create_event(
         title=title,
@@ -313,7 +318,12 @@ async def toggle_attendance(cb: CallbackQuery, repo: Repo, actor: Actor | None) 
 
 async def show_events_list(target: CallbackQuery | Message, repo: Repo, page: int = 0) -> None:
     events = list(reversed(await repo.list_events()))
-    counts = await repo.attendance_counts(e.id for e in events)
+    students = await repo.list_students()
+    attendance = await repo.attendance_all()
+    counts = {
+        event.id: len(attendance.get(event.id, set()) & {s.id for s in students if s.counts_on(event.day)})
+        for event in events
+    }
     text = "📅 <b>Занятия</b>\n\nДата · название · отмечено. 🔚 — последнее занятие месяца."
     if not events:
         text = "📅 <b>Занятия</b>\n\nЗанятий пока нет. Создайте первое через «Новое занятие»."
@@ -372,19 +382,25 @@ async def edit_event_start(cb: CallbackQuery, state: FSMContext, repo: Repo, con
         await state.set_state(EditEventSG.date)
         await respond(
             cb,
-            f"Текущая дата: <b>{event.day.strftime('%d.%m.%Y')}</b>\n\nНовая дата? Кнопка или текст.",
+            f"Текущая дата: <b>{event.day.strftime('%d.%m.%Y')}</b>\n\n"
+            "Новая дата? Кнопка или текст. От даты зависит, в какой месяц попадёт занятие."
+            + (" Это последнее занятие месяца — граница переедет вместе с ним." if event.closes_month else ""),
             date_quick_kb("ed", local_today(config.timezone), back=back),
         )
     elif field == "time":
         await state.set_state(EditEventSG.time)
         await respond(
             cb,
-            f"Текущее время: <b>{event.start_time or 'не задано'}</b>\n\nНовое время? Кнопка или текст.",
+            f"Текущее время: <b>{event.start_time or 'не задано'}</b>\n\nНовое время? Кнопка или текст."
+            + (" Это последнее занятие месяца: от времени зависит, какие занятия этого дня останутся в месяце." if event.closes_month else ""),
             time_kb("et", back=back),
         )
 
 
 async def _apply_edit(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, **fields) -> None:
+    if not await require_level(target, actor):
+        await state.clear()
+        return
     data = await state.get_data()
     event_id = data.get("edit_event_id")
     event = await repo.get_event(int(event_id)) if event_id else None
@@ -394,11 +410,22 @@ async def _apply_edit(target: CallbackQuery | Message, state: FSMContext, repo: 
         return
     labels = {"title": "название", "event_date": "дата", "start_time": "время"}
     before = {k: getattr(event, k) for k in fields}
+    moved_period = "event_date" in fields or "start_time" in fields
+    before_period = period_of_event(await load_periods(repo, config), event.id) if moved_period else None
     await repo.update_event(event.id, **fields)
     await state.clear()
     for key, value in fields.items():
         await audit(repo, actor, "event.update", entity_type="event", entity_id=event.id, поле=labels[key], было=before[key], стало=value)
-    await show_event_card(target, repo, config, event.id, notice="Сохранено")
+    notice = "Сохранено"
+    if moved_period:
+        after_period = period_of_event(await load_periods(repo, config), event.id)
+        before_ids = {item.id for item in before_period.events} if before_period else set()
+        after_ids = {item.id for item in after_period.events} if after_period else set()
+        if event.closes_month and before_ids != after_ids:
+            notice = "Сохранено. Граница месяца переехала вместе с занятием."
+        elif before_period and after_period and before_period.key != after_period.key:
+            notice = f"Сохранено. Занятие теперь в месяце «{after_period.title}» ({period_range_text(after_period)})."
+    await show_event_card(target, repo, config, event.id, notice=notice)
 
 
 @router.message(EditEventSG.title, F.text)
@@ -495,7 +522,7 @@ async def toggle_closer(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
 
 
 @router.callback_query(F.data.startswith("evd:"))
-async def delete_event_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
+async def delete_event_ask(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
     if not await require_level(cb, actor):
         return
     event = await repo.get_event(int(cb.data.split(":", 1)[1]))
@@ -503,16 +530,25 @@ async def delete_event_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -
         await answer_callback(cb, "Занятие не найдено", show_alert=True)
         return
     present = len(await repo.attendance_student_ids(event.id))
+    boundary = ""
+    if event.closes_month:
+        periods = await load_periods(repo, config)
+        period = period_of_event(periods, event.id)
+        if period is not None and len(period.events) > 1:
+            boundary = "\n\nЭто последнее занятие месяца. Граница перейдёт на предыдущее занятие, месяц не сольётся со следующим."
+        else:
+            boundary = "\n\nЭто единственное занятие закрытого месяца. После удаления месяц откроется и сольётся со следующим."
     await respond(
         cb,
         f"Удалить занятие?\n{event_title_line(event)}\nОтметок присутствия: {present}\n\n"
-        "Занятие исчезнет из статистики. Запись о нём останется в журнале.",
+        "Занятие исчезнет из статистики. Запись о нём останется в журнале."
+        f"{boundary}",
         confirm_kb(f"evdc:{event.id}", f"ev:{event.id}", yes_text="🗑 Удалить"),
     )
 
 
 @router.callback_query(F.data.startswith("evdc:"))
-async def delete_event(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
+async def delete_event(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
     if not await require_level(cb, actor):
         return
     assert actor is not None
@@ -520,6 +556,12 @@ async def delete_event(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> No
     if event is None or event.deleted_at:
         await answer_callback(cb, "Занятие не найдено", show_alert=True)
         return
+    if event.closes_month:
+        periods = await load_periods(repo, config)
+        period = period_of_event(periods, event.id)
+        if period is not None and len(period.events) > 1:
+            previous = period.events[-2]
+            await repo.update_event(previous.id, closes_month=1, month_title=event.month_title)
     await repo.delete_event(event.id)
     await audit(repo, actor, "event.delete", entity_type="event", entity_id=event.id, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}")
     await answer_callback(cb, "Занятие удалено")

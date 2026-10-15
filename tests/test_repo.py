@@ -89,7 +89,9 @@ async def test_requests_and_excuses(repo: Repo):
     assert await repo.has_open_request(s.id, e.id)
     assert await repo.count_open_requests() == 1
     resolved = await repo.resolve_request(req.id, "approved", 1, None)
-    assert resolved.status == "approved" and not await repo.has_open_request(s.id, e.id)
+    assert resolved is not None and resolved.status == "approved" and not await repo.has_open_request(s.id, e.id)
+    assert await repo.resolve_request(req.id, "rejected", 2, "поздно") is None
+    assert (await repo.get_request(req.id)).status == "approved"
 
     ex = await repo.create_excuse(s.id, "sick", "2026-09-01", "2026-09-05", "справка", 1)
     assert [x.id for x in await repo.list_excuses()] == [ex.id]

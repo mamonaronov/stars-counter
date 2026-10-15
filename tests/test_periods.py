@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.periods import OPEN_KEY, build_periods, find_period, period_of_event, period_range_text
+from services.periods import OPEN_KEY, Period, build_periods, find_period, period_button_label, period_of_event, period_range_text
 from tests.conftest import TODAY, event
 
 
@@ -31,6 +31,15 @@ def test_closing_event_splits_periods():
     assert period_of_event(periods, 4) is current
     assert find_period(periods, "3") is september
     assert period_range_text(september) == "01.09.2026 — 29.09.2026"
+
+
+def test_period_button_fits_telegram_limit():
+    title = "Очень длинное название месяца " * 4
+    period = Period(key="1", title=title, events=[event(1, "2026-09-01", closes=True)], closer=None)
+    label = period_button_label(period)
+    assert len(label) <= 64
+    assert label.endswith("· 1 зан.")
+    assert "Очень длинное" in label
 
 
 def test_custom_month_title_wins():

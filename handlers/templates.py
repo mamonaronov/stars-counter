@@ -74,6 +74,9 @@ async def new_template_kind(cb: CallbackQuery, state: FSMContext) -> None:
 
 
 async def _finish_template(target: CallbackQuery | Message, state: FSMContext, repo: Repo, actor: Actor, default_time: str | None) -> None:
+    if not await require_level(target, actor):
+        await state.clear()
+        return
     data = await state.get_data()
     tpl = await repo.create_template(data["tpl_title"], data["tpl_kind"], default_time, actor.telegram_id)
     await state.clear()

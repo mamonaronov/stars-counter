@@ -136,9 +136,9 @@ async def test_full_flow(h: Harness):
     # toggle attendance on and off through the buttons
     await h.press(MARKER, "Иванов")
     assert await h.repo.is_present(event1.id, ivanov.id)
-    assert "✅ Иванов И." in h.buttons()
+    assert "✅ Иванов Иван" in h.buttons()
     assert "Отмечено: <b>1</b>" in h.last_text()
-    await h.press(MARKER, "✅ Иванов И.")
+    await h.press(MARKER, "✅ Иванов Иван")
     assert not await h.repo.is_present(event1.id, ivanov.id)
     await h.press(MARKER, "Иванов")
     await h.press(MARKER, "Петров")
@@ -334,6 +334,77 @@ async def test_excuse_list_is_paged(h: Harness):
     assert first_page and second_page and set(first_page).isdisjoint(second_page)
 
 
+async def test_deleting_month_closer_keeps_the_month(h: Harness):
+    first = await h.repo.create_event("Первое", "mandatory", "2026-09-01", None, None, SUPER)
+    second = await h.repo.create_event("Второе", "mandatory", "2026-09-10", None, None, SUPER)
+    await h.repo.update_event(second.id, closes_month=1, month_title="Сентябрь 2026")
+    later = await h.repo.create_event("Октябрь", "mandatory", "2026-10-02", None, None, SUPER)
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, f"evd:{second.id}")
+    await h.press(SUPER, "🗑 Удалить")
+    assert (await h.repo.get_event(second.id)).deleted_at
+    kept = await h.repo.get_event(first.id)
+    assert kept.closes_month == 1 and kept.month_title == "Сентябрь 2026"
+    assert (await h.repo.get_event(later.id)).closes_month == 0
+
+
+async def test_time_edit_tells_when_event_changes_month(h: Harness):
+    closer = await h.repo.create_event("Утро", "mandatory", "2026-09-10", "09:00", None, SUPER)
+    later = await h.repo.create_event("День", "mandatory", "2026-09-10", "12:00", None, SUPER)
+    await h.repo.update_event(closer.id, closes_month=1, month_title="Сентябрь 2026")
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, f"ev:{later.id}")
+    await h.press(SUPER, "🕐 Время")
+    await h.text(SUPER, "08:00")
+    assert "теперь в месяце «Сентябрь 2026»" in h.last_text()
+    assert (await h.repo.get_event(later.id)).start_time == "08:00"
+
+
+async def test_month_end_cannot_jump_over_a_period(h: Harness):
+    first = await h.repo.create_event("Сентябрь", "mandatory", "2026-09-01", None, None, SUPER)
+    october = await h.repo.create_event("Октябрь", "mandatory", "2026-10-01", None, None, SUPER)
+    november = await h.repo.create_event("Ноябрь", "mandatory", "2026-11-01", None, None, SUPER)
+    await h.repo.update_event(first.id, closes_month=1, month_title="Сентябрь 2026")
+    await h.repo.update_event(october.id, closes_month=1, month_title="Октябрь 2026")
+    await h.repo.update_event(november.id, closes_month=1, month_title="Ноябрь 2026")
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, f"monce:{first.id}:{november.id}")
+    assert "другого месяца" in h.session.last("AnswerCallbackQuery").text
+    assert (await h.repo.get_event(first.id)).closes_month == 1
+    assert (await h.repo.get_event(october.id)).month_title == "Октябрь 2026"
+    assert (await h.repo.get_event(november.id)).month_title == "Ноябрь 2026"
+
+
+async def test_removed_student_keeps_own_attendance(h: Harness):
+    student = await h.repo.create_student("Бывший Борис", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(student.id, STUDENT)
+    await h.repo.remove_student(student.id, "2026-10-01")
+    await h.text(STUDENT, "/start")
+    assert "👤 Моя посещаемость" in h.buttons()
+    assert "не верифицированы" not in h.last_text()
+    assert not any("Новое занятие" in b for b in h.buttons())
+    await h.click(STUDENT, "s:my")
+    assert "Бывший Борис" in h.last_text()
+    await h.text(GUEST, "/start")
+    await h.click(GUEST, "s:att")
+    await h.press(GUEST, "Бывший")
+    assert "Бывший Борис" in h.last_text()
+
+
+async def test_same_name_does_not_create_a_second_card(h: Harness):
+    student = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
+    await h.repo.remove_student(student.id, "2026-10-01")
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, "s:stu")
+    await h.press(SUPER, "➕ Добавить")
+    await h.text(SUPER, "Иванов Иван")
+    assert "среди удалённых" in h.last_text()
+    assert len(await h.repo.list_students(active_only=False)) == 1
+    await h.press(SUPER, "Восстановить")
+    restored = await h.repo.get_student(student.id)
+    assert restored.is_active and restored.left_on is None
+
+
 async def test_student_picker_filter(h: Harness):
     for name in ("Антонов Антон", "Борисов Борис", "Антипов Пётр"):
         await h.repo.create_student(name, 2023, "2026-09-01", SUPER)
@@ -342,5 +413,5 @@ async def test_student_picker_filter(h: Harness):
     assert len([b for b in h.buttons() if "pk:att:" in h.buttons()[b]]) == 3
     await h.text(GUEST, "анти")
     picks = {t: d for t, d in h.buttons().items() if d.startswith("pk:att:")}
-    assert list(picks) == ["Антипов П."]
+    assert list(picks) == ["Антипов Пётр"]
     assert "найдено 1" in h.last_text()

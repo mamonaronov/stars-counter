@@ -146,10 +146,48 @@ async def add_student_name(message: Message, state: FSMContext, repo: Repo) -> N
         await message.answer("Нужны минимум фамилия и имя.", reply_markup=cancel_kb(SEC_STUDENTS))
         return
     existing = await repo.find_student_by_name(name)
-    hint = f"\n\n⚠️ Студент с таким именем уже есть (id {existing.id})." if existing else ""
+    removed = None if existing else await repo.find_student_by_name(name, active_only=False)
+    await state.update_data(new_name=name)
+    if existing or (removed is not None and not removed.is_active):
+        other = existing or removed
+        assert other is not None
+        b = InlineKeyboardBuilder()
+        if existing:
+            text = (
+                f"Студент <b>{esc(name)}</b> уже есть в группе. "
+                "Новая карточка не свяжется с его посещениями.\n\n"
+                "Откройте существующую карточку или подтвердите, что это другой человек."
+            )
+            b.row(btn("Открыть карточку", f"stc:{other.id}"))
+        else:
+            text = (
+                f"<b>{esc(name)}</b> есть среди удалённых. "
+                "Новая карточка не получит старую историю посещений.\n\n"
+                "Восстановите карточку или подтвердите, что это другой человек."
+            )
+            b.row(btn("♻️ Восстановить карточку", f"stre:{other.id}"))
+        b.row(btn("Это другой человек", "stuf"))
+        b.row(btn("✖️ Отмена", SEC_STUDENTS))
+        await message.answer(text, reply_markup=b.as_markup())
+        return
+    await _ask_enrollment_year(message, state, name)
+
+
+async def _ask_enrollment_year(target: CallbackQuery | Message, state: FSMContext, name: str) -> None:
     await state.update_data(new_name=name)
     await state.set_state(StudentSG.add_year)
-    await message.answer(f"Имя: <b>{esc(name)}</b>{hint}\n\nГод поступления? Например: <code>2023</code>.", reply_markup=cancel_kb(SEC_STUDENTS))
+    await respond(target, f"Имя: <b>{esc(name)}</b>\n\nГод поступления? Например: <code>2023</code>.", cancel_kb(SEC_STUDENTS))
+
+
+@router.callback_query(StudentSG.add_name, F.data == "stuf")
+async def add_student_force(cb: CallbackQuery, state: FSMContext, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+        return
+    name = (await state.get_data()).get("new_name")
+    if not name:
+        await answer_callback(cb, "Имя не найдено, начните сначала", show_alert=True)
+        return
+    await _ask_enrollment_year(cb, state, str(name))
 
 
 def _joined_prompt(today: date) -> str:
@@ -180,6 +218,9 @@ async def add_student_year(message: Message, state: FSMContext, config: Config) 
 
 
 async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, joined: date) -> None:
+    if not await require_level(target, actor, LEVEL_CHIEF_MARKER):
+        await state.clear()
+        return
     data = await state.get_data()
     await state.clear()
     student = await repo.create_student(data["new_name"], data["new_year"], joined.isoformat(), actor.telegram_id)
@@ -250,7 +291,9 @@ async def import_preview(message: Message, state: FSMContext, repo: Repo, config
     if not parsed:
         await message.answer("Не нашёл ни одной строки со студентом.", reply_markup=cancel_kb(SEC_STUDENTS))
         return
-    existing = {s.full_name.lower() for s in await repo.list_students()}
+    all_students = await repo.list_students(active_only=False)
+    existing = {s.full_name.casefold() for s in all_students if s.is_active}
+    removed = {s.full_name.casefold() for s in all_students if not s.is_active}
     seen: set[str] = set()
     ok: list[dict] = []
     lines = ["📥 <b>Проверьте список</b>", ""]
@@ -258,9 +301,12 @@ async def import_preview(message: Message, state: FSMContext, repo: Repo, config
         if item.error:
             lines.append(f"⚠️ стр. {item.line_no}: «{esc(item.raw)}» — {esc(item.error)}")
             continue
-        key = item.full_name.lower()
+        key = item.full_name.casefold()
         if key in existing:
             lines.append(f"↩️ {esc(item.full_name)} — уже есть, пропущу")
+            continue
+        if key in removed:
+            lines.append(f"↩️ {esc(item.full_name)} — есть среди удалённых, пропущу. Восстановите карточку, если это тот же студент")
             continue
         if key in seen:
             lines.append(f"↩️ {esc(item.full_name)} — повтор в списке")
@@ -300,7 +346,7 @@ async def import_confirm(cb: CallbackQuery, state: FSMContext, repo: Repo, confi
     await state.clear()
     created: list[str] = []
     for row in rows:
-        if await repo.find_student_by_name(row["name"]):
+        if await repo.find_student_by_name(row["name"], active_only=False):
             continue
         student = await repo.create_student(row["name"], row["year"], joined, actor.telegram_id)
         created.append(student.full_name)
@@ -351,6 +397,9 @@ async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
 
 
 async def _apply_student_edit(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, field: str, value, label: str) -> None:
+    if not await require_level(message, actor, LEVEL_CHIEF_MARKER):
+        await state.clear()
+        return
     data = await state.get_data()
     student = await repo.get_student(int(data.get("edit_student_id") or 0))
     await state.clear()
@@ -470,9 +519,10 @@ async def removed_students_page(cb: CallbackQuery, repo: Repo, actor: Actor | No
 
 
 @router.callback_query(F.data.startswith("stre:"))
-async def restore_student(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+async def restore_student(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
     if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
         return
+    await state.clear()
     assert actor is not None
     student = await repo.get_student(int(cb.data.split(":", 1)[1]))
     if student is None:

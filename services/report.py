@@ -33,6 +33,13 @@ _MATRIX_MARK = {
 }
 
 
+def _percent_cell(item: StudentStats):
+    """None means there were no mandatory events, so the percent is undefined — not zero."""
+    if item.percent is None:
+        return "—"
+    return item.percent / 100
+
+
 def _fmt(day: date | None) -> str:
     return day.strftime("%d.%m.%Y") if day else "—"
 
@@ -74,8 +81,9 @@ def build_report_xlsx(
         ws.cell(row=row, column=1, value=index).border = _BORDER
         name_cell = ws.cell(row=row, column=2, value=item.student.full_name)
         name_cell.border = _BORDER
-        pct_cell = ws.cell(row=row, column=3, value=(item.percent or 0.0) / 100)
-        pct_cell.number_format = "0.00%"
+        pct_cell = ws.cell(row=row, column=3, value=_percent_cell(item))
+        if item.percent is not None:
+            pct_cell.number_format = "0.00%"
         pct_cell.border = _BORDER
         pct_cell.alignment = Alignment(horizontal="right")
         row += 1
@@ -143,12 +151,12 @@ def _details_sheet(wb: Workbook, period_title: str, stats: list[StudentStats], e
             item.attended_mandatory,
             item.attended_free,
             item.excused,
-            (item.percent or 0.0) / 100,
+            _percent_cell(item),
         )
         for col, value in enumerate(values, start=1):
             cell = ws.cell(row=row, column=col, value=value)
             cell.border = _BORDER
-            if col == len(fixed):
+            if col == len(fixed) and item.percent is not None:
                 cell.number_format = "0.00%"
         by_event = {r.event.id: r for r in item.rows}
         for offset, event in enumerate(events):
