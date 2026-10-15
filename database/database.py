@@ -12,6 +12,7 @@ from pathlib import Path
 import aiosqlite
 
 from config import Config
+from database.vpn_database import VpnDatabase
 from utils.time import now_utc, to_iso
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class Database:
         self.path = config.db_path
         self.backup_dir = config.backup_path
         self._conn: aiosqlite.Connection | None = None
+        self.vpn_db: VpnDatabase | None = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -100,6 +102,12 @@ class Database:
         await self._assert_wal()
 
     async def close(self) -> None:
+        if self.vpn_db is not None:
+            try:
+                await self.vpn_db.close()
+            except Exception:
+                logger.exception("VPN database close failed")
+            self.vpn_db = None
         if self._conn is not None:
             try:
                 await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -305,3 +313,10 @@ class Database:
         if not await self.integrity_ok():
             raise DatabaseUnrecoverableError("Database failed integrity_check after migrate")
         await self._assert_wal()
+        await self._init_vpn_database()
+
+    async def _init_vpn_database(self) -> None:
+        if self.vpn_db is None:
+            self.vpn_db = VpnDatabase(self.config)
+            await self.vpn_db.initialize()
+        await self.vpn_db.enforce_max_bytes(self.config.vpn_db_max_bytes)

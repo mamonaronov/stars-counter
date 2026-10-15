@@ -33,6 +33,7 @@ from services.telegram_backup import (
     set_telegram_backup_chat,
     telegram_backup_chat,
 )
+from services.vpn_monitor import ping_status_line
 from utils.callbacks import SEC_SERVICE
 from utils.formatting import esc
 from utils.telegram import answer_callback
@@ -85,6 +86,7 @@ async def show_service(cb: CallbackQuery, repo: Repo, config: Config) -> None:
         f"Последний бэкап на диск: {format_dt_iso(last_backup, config.timezone)}",
         _backup_line(config, backup_chat, backup_title, last_tg),
         table_line,
+        await ping_status_line(repo, config),
     ]
     b = InlineKeyboardBuilder()
     b.row(btn("📦 Прислать бэкап сейчас", "srvb"))

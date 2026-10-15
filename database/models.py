@@ -170,3 +170,15 @@ class AuditEntry:
     entity_id: int | None
     details: str | None
     created_at: str
+
+
+@dataclass(slots=True)
+class VpnLatencySample:
+    id: int
+    measured_at: str
+    ok: int
+    latency_ms: int | None
+    node_name: str | None
+    subscription: str | None
+    error: str | None
+    host_uptime_s: float | None = None

@@ -20,6 +20,7 @@ from database.models import (
     Student,
     User,
     VerificationLink,
+    VpnLatencySample,
 )
 from utils.time import now_utc, to_iso
 
@@ -522,3 +523,54 @@ class Repo:
             row = await self._fetchone(sql)
             result[name] = int(row[0]) if row else 0
         return result
+
+    # ----------------------------------------------------------- ping samples
+
+    async def insert_vpn_sample(
+        self,
+        measured_at: str,
+        ok: bool,
+        latency_ms: int | None,
+        node_name: str | None,
+        subscription: str | None,
+        error: str | None,
+        host_uptime_s: float | None = None,
+    ) -> int:
+        vpn = self.db.vpn_db
+        if vpn is None:
+            from database.database import DatabaseError
+
+            raise DatabaseError("VPN database is not connected")
+        cur = await vpn.conn.execute(
+            """
+            INSERT INTO vpn_latency_samples
+                (measured_at, ok, latency_ms, node_name, subscription, error, host_uptime_s)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (measured_at, 1 if ok else 0, latency_ms, node_name, subscription, error, host_uptime_s),
+        )
+        await self.db.vpn_db.conn.commit()
+        return int(cur.lastrowid or 0)
+
+    async def latest_vpn_sample(self) -> VpnLatencySample | None:
+        vpn = self.db.vpn_db
+        if vpn is None:
+            return None
+        async with vpn.conn.execute(
+            """
+            SELECT id, measured_at, ok, latency_ms, node_name, subscription, error, host_uptime_s
+            FROM vpn_latency_samples
+            ORDER BY measured_at DESC, id DESC
+            LIMIT 1
+            """
+        ) as cur:
+            row = await cur.fetchone()
+        return VpnLatencySample(**dict(row)) if row else None
+
+    async def count_vpn_samples(self) -> int:
+        vpn = self.db.vpn_db
+        if vpn is None:
+            return 0
+        async with vpn.conn.execute("SELECT COUNT(*) FROM vpn_latency_samples") as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0

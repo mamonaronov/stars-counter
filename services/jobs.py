@@ -14,11 +14,14 @@ from database.queries import Repo
 from services.alerts import format_alert, notify_alert
 from services.group_export import KEY_LAST_ERROR, publish_markers_export
 from utils.time import now_utc, to_iso
+from utils.timeouts import await_or_abandon
 
 logger = logging.getLogger(__name__)
 
 _TELEGRAM_BACKUP_START_DELAY = timedelta(seconds=20)
 _TELEGRAM_BACKUP_RETRY = timedelta(minutes=15)
+_VPN_MONITOR_JOB_SLACK = 5.0
+_VPN_RETENTION_EVERY = timedelta(minutes=15)
 
 
 def reschedule_telegram_backup(
@@ -101,6 +104,39 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot, repo: Repo, db: Datab
         max_instances=1,
         coalesce=True,
     )
+    if config.vpn_monitor_enabled:
+        from services.vpn_monitor import VpnMonitor, make_probe_bot
+
+        monitor = VpnMonitor(config, probe_bot=make_probe_bot(config))
+        interval = max(5, config.vpn_monitor_interval_seconds)
+        scheduler.add_job(
+            vpn_monitor_job,
+            "interval",
+            seconds=interval,
+            id="vpn_monitor",
+            replace_existing=True,
+            kwargs={"monitor": monitor, "bot": bot, "repo": repo},
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=max(1, interval - 1),
+            next_run_time=now_utc() + timedelta(seconds=interval),
+        )
+        logger.info(
+            "VPN monitor enabled interval=%ss group=%s",
+            interval,
+            config.mihomo_proxy_group,
+        )
+    scheduler.add_job(
+        vpn_retention_job,
+        "interval",
+        minutes=15,
+        id="vpn_retention",
+        replace_existing=True,
+        kwargs={"db": db},
+        max_instances=1,
+        coalesce=True,
+        next_run_time=now_utc() + _VPN_RETENTION_EVERY,
+    )
 
 
 async def backup_job(db: Database, bot: Bot, config: Config) -> None:
@@ -174,3 +210,33 @@ async def cleanup_job(repo: Repo) -> None:
         await repo.cleanup_callbacks(to_iso(now_utc() - timedelta(days=2)))
     except Exception:
         logger.exception("Callback cleanup failed")
+
+
+def vpn_monitor_job_timeout(monitor) -> float:
+    """Keep the APScheduler slot shorter than the interval so ticks are not skipped."""
+    inner = float(monitor.config.vpn_monitor_timeout_seconds) + _VPN_MONITOR_JOB_SLACK
+    interval = max(5, int(monitor.config.vpn_monitor_interval_seconds))
+    return min(inner, max(1.0, interval - 1.0))
+
+
+async def vpn_monitor_job(monitor, bot: Bot, repo: Repo) -> None:
+    timeout = vpn_monitor_job_timeout(monitor)
+    try:
+        await await_or_abandon(monitor.tick(bot, repo), timeout, name="vpn_monitor_job")
+    except TimeoutError:
+        logger.warning("VPN monitor tick timed out after %.0fs, resetting probe session", timeout)
+        await monitor.reset_probe()
+    except Exception:
+        logger.exception("VPN monitor tick failed")
+
+
+async def vpn_retention_job(db: Database) -> None:
+    vpn = db.vpn_db
+    if vpn is None:
+        return
+    try:
+        deleted = await vpn.enforce_max_bytes(db.config.vpn_db_max_bytes)
+        if deleted:
+            logger.info("VPN samples pruned: %s", deleted)
+    except Exception:
+        logger.exception("VPN sample prune failed")

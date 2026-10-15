@@ -55,6 +55,17 @@ def _optional_int(name: str) -> int | None:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Ping samples live in their own file. 500 MiB, including the WAL sidecar.
+VPN_DB_MAX_BYTES = 500 * 1024 * 1024
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     bot_token: str
@@ -72,6 +83,14 @@ class Config:
     markers_group_id: int | None = None
     markers_export_interval_minutes: int = 10
     telegram_backup_root: Path = PROJECT_ROOT
+    vpn_db_path: Path | None = None
+    vpn_db_max_bytes: int = VPN_DB_MAX_BYTES
+    vpn_monitor_enabled: bool = True
+    vpn_monitor_interval_seconds: int = 10
+    vpn_monitor_timeout_seconds: int = 8
+    mihomo_api_url: str = "http://127.0.0.1:19090"
+    mihomo_api_secret: str | None = None
+    mihomo_proxy_group: str = "AUTO"
 
 
 def load_config() -> Config:
@@ -85,6 +104,7 @@ def load_config() -> Config:
 
     db_path = Path(os.getenv("DB_PATH", "/app/data/database.sqlite3"))
     backup_path = Path(os.getenv("BACKUP_PATH", "/app/backups"))
+    vpn_db_raw = os.getenv("VPN_DB_PATH", "").strip()
 
     return Config(
         bot_token=token,
@@ -101,4 +121,12 @@ def load_config() -> Config:
         markers_group_id=_optional_int("MARKERS_GROUP_ID"),
         markers_export_interval_minutes=max(0, _int("MARKERS_EXPORT_INTERVAL_MINUTES", 10)),
         telegram_backup_root=Path(os.getenv("TELEGRAM_BACKUP_ROOT", "").strip() or str(PROJECT_ROOT)),
+        vpn_db_path=Path(vpn_db_raw) if vpn_db_raw else db_path.with_name("vpn.sqlite3"),
+        vpn_db_max_bytes=max(1, _int("VPN_DB_MAX_MB", 500)) * 1024 * 1024,
+        vpn_monitor_enabled=_bool("VPN_MONITOR_ENABLED", True),
+        vpn_monitor_interval_seconds=max(5, _int("VPN_MONITOR_INTERVAL_SECONDS", 10)),
+        vpn_monitor_timeout_seconds=max(1, _int("VPN_MONITOR_TIMEOUT_SECONDS", 8)),
+        mihomo_api_url=os.getenv("MIHOMO_API_URL", "http://127.0.0.1:19090").strip() or "http://127.0.0.1:19090",
+        mihomo_api_secret=_optional("MIHOMO_API_SECRET"),
+        mihomo_proxy_group=os.getenv("MIHOMO_PROXY_GROUP", "AUTO").strip() or "AUTO",
     )
