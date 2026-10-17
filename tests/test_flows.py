@@ -298,6 +298,21 @@ async def test_lower_role_cannot_remove_or_unlink_higher(h: Harness):
     assert (await h.repo.get_student(admin.id)).telegram_id == 50
 
 
+async def test_rename_refuses_an_existing_name(h: Harness):
+    await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
+    other = await h.repo.create_student("Петров Пётр", 2023, "2026-09-01", SUPER)
+    removed = await h.repo.create_student("Сидоров Сидор", 2023, "2026-09-01", SUPER)
+    await h.repo.remove_student(removed.id, "2026-10-01")
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, f"ste:name:{other.id}")
+    await h.text(SUPER, "иванов иван")
+    assert "уже есть" in h.last_text()
+    assert (await h.repo.get_student(other.id)).full_name == "Петров Пётр"
+    await h.text(SUPER, "сидоров сидор")
+    assert "удалённых" in h.last_text()
+    assert (await h.repo.get_student(other.id)).full_name == "Петров Пётр"
+
+
 async def test_marking_skips_student_not_yet_enrolled(h: Harness):
     late = await h.repo.create_student("Поздний Пётр", 2024, "2026-10-01", SUPER)
     event = await h.repo.create_event("Лекция", "mandatory", "2026-09-01", "10:00", None, SUPER)

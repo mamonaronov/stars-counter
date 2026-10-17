@@ -343,13 +343,13 @@ async def import_confirm(cb: CallbackQuery, state: FSMContext, repo: Repo, confi
     data = await state.get_data()
     rows = data.get("import_rows") or []
     joined = data.get("import_from") or local_today(config.timezone).isoformat()
+    created_students = await repo.import_students(
+        [(row["name"], row["year"]) for row in rows],
+        joined,
+        actor.telegram_id,
+    )
     await state.clear()
-    created: list[str] = []
-    for row in rows:
-        if await repo.find_student_by_name(row["name"], active_only=False):
-            continue
-        student = await repo.create_student(row["name"], row["year"], joined, actor.telegram_id)
-        created.append(student.full_name)
+    created = [student.full_name for student in created_students]
     await audit(
         repo,
         actor,
@@ -420,6 +420,19 @@ async def edit_student_name(message: Message, state: FSMContext, repo: Repo, con
     name = normalize_name(message.text or "")
     if len(name.split()) < 2:
         await message.answer("Нужны минимум фамилия и имя.")
+        return
+    data = await state.get_data()
+    student_id = int(data.get("edit_student_id") or 0)
+    other = await repo.find_student_by_name(name, active_only=False)
+    if other is not None and other.id != student_id:
+        back = cancel_kb(f"stc:{student_id}") if student_id else cancel_kb(SEC_STUDENTS)
+        if other.is_active:
+            await message.answer(f"Студент <b>{esc(name)}</b> уже есть в группе.", reply_markup=back)
+        else:
+            await message.answer(
+                f"<b>{esc(name)}</b> есть среди удалённых. Восстановите ту карточку, если это тот же студент.",
+                reply_markup=back,
+            )
         return
     await _apply_student_edit(message, state, repo, config, actor, "full_name", name, "имя")
 

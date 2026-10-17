@@ -11,7 +11,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Config
 from database.models import Event
-from database.queries import Repo
+from database.queries import MonthBoundaryError, Repo
 from handlers.common import KIND_TITLES, event_title_line, load_periods, require_level, respond
 from keyboards.main import (
     back_kb,
@@ -503,9 +503,15 @@ async def toggle_closer(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
         period = period_of_event(periods, event.id)
         moved = period is not None and period.closer is not None and period.closer.id != event.id
         kept_title = period.closer.month_title if moved and period and period.closer else None
-        if moved and period and period.closer:
-            await repo.update_event(period.closer.id, closes_month=0, month_title=None)
-        await repo.update_event(event.id, closes_month=1, month_title=kept_title)
+        try:
+            await repo.set_month_closer(
+                event.id,
+                previous_closer_id=period.closer.id if moved and period and period.closer else None,
+                month_title=kept_title,
+            )
+        except MonthBoundaryError:
+            await answer_callback(cb, "Граница месяца уже изменилась. Откройте занятие ещё раз.", show_alert=True)
+            return
         await audit(
             repo,
             actor,
@@ -560,13 +566,17 @@ async def delete_event(cb: CallbackQuery, repo: Repo, config: Config, actor: Act
     if event is None or event.deleted_at:
         await answer_callback(cb, "Занятие не найдено", show_alert=True)
         return
+    successor_id = None
     if event.closes_month:
         periods = await load_periods(repo, config)
         period = period_of_event(periods, event.id)
         if period is not None and len(period.events) > 1:
-            previous = period.events[-2]
-            await repo.update_event(previous.id, closes_month=1, month_title=event.month_title)
-    await repo.delete_event(event.id)
+            successor_id = period.events[-2].id
+    try:
+        await repo.delete_event(event.id, successor_id=successor_id, month_title=event.month_title)
+    except MonthBoundaryError:
+        await answer_callback(cb, "Граница месяца уже изменилась. Откройте занятие ещё раз.", show_alert=True)
+        return
     await audit(repo, actor, "event.delete", entity_type="event", entity_id=event.id, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}")
     await answer_callback(cb, "Занятие удалено")
     await show_events_list(cb, repo)

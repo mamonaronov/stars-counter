@@ -314,13 +314,14 @@ class Database:
         return files[0] if files else None
 
     async def get_system(self, key: str) -> str | None:
-        try:
-            async with self._lock:
+        async with self._lock:
+            try:
                 async with self.conn.execute("SELECT value FROM system_info WHERE key = ?", (key,)) as cur:
                     row = await cur.fetchone()
-            return str(row[0]) if row and row[0] is not None else None
-        except Exception:
-            return None
+            except Exception:
+                logger.exception("Failed to read system_info key %s", key)
+                raise
+        return str(row[0]) if row and row[0] is not None else None
 
     async def set_system(self, key: str, value: str) -> None:
         async with self._lock:

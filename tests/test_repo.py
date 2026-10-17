@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from database.database import Database, DatabaseError, split_sql
-from database.queries import Approval, Repo, RoleOccupiedError, RoleTransferError
+from database.queries import Approval, MonthBoundaryError, Repo, RoleOccupiedError, RoleTransferError
 from services.audit import audit
 from tests.conftest import actor, make_config
 
@@ -236,6 +236,35 @@ def test_split_sql_keeps_statements_and_drops_comments():
     assert statements == ["CREATE TABLE t(id INTEGER)", "INSERT INTO t VALUES (1)"]
 
 
+async def test_month_boundary_and_import_are_atomic(repo: Repo):
+    first = await repo.create_event("Первое", "mandatory", "2026-09-01", None, None, 1)
+    second = await repo.create_event("Второе", "mandatory", "2026-09-10", None, None, 1)
+    await repo.update_event(first.id, closes_month=1, month_title="Сентябрь")
+    await repo.set_month_closer(second.id, previous_closer_id=first.id, month_title="Сентябрь")
+    assert (await repo.get_event(first.id)).closes_month == 0
+    assert (await repo.get_event(second.id)).closes_month == 1
+    assert (await repo.get_event(second.id)).month_title == "Сентябрь"
+    with pytest.raises(MonthBoundaryError):
+        await repo.set_month_closer(first.id, previous_closer_id=999, month_title="Октябрь")
+    assert (await repo.get_event(second.id)).closes_month == 1
+    assert (await repo.get_event(first.id)).closes_month == 0
+
+    await repo.delete_event(second.id, successor_id=first.id, month_title="Сентябрь")
+    kept = await repo.get_event(first.id)
+    removed = await repo.get_event(second.id)
+    assert kept is not None and kept.closes_month == 1 and kept.month_title == "Сентябрь"
+    assert removed is not None and removed.deleted_at and removed.closes_month == 0
+    with pytest.raises(MonthBoundaryError):
+        await repo.delete_event(first.id, successor_id=second.id, month_title="Сентябрь")
+    assert (await repo.get_event(first.id)).deleted_at is None
+
+    created = await repo.import_students([("Иванов Иван", 2023), ("Петров Пётр", 2024)], "2026-09-01", 1)
+    assert [student.full_name for student in created] == ["Иванов Иван", "Петров Пётр"]
+    again = await repo.import_students([("иванов иван", 2023), ("Сидоров Сидор", 2022)], "2026-09-01", 1)
+    assert [student.full_name for student in again] == ["Сидоров Сидор"]
+    assert len(await repo.list_students()) == 3
+
+
 async def test_set_system_raises(tmp_path):
     db = Database(make_config(tmp_path))
     await db.initialize()
@@ -245,6 +274,8 @@ async def test_set_system_raises(tmp_path):
         await db.conn.close()
         with pytest.raises(Exception):
             await db.set_system("probe", "2")
+        with pytest.raises(Exception):
+            await db.get_system("probe")
     finally:
         db._conn = None
         await db.close()

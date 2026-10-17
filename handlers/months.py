@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Config
-from database.queries import Repo
+from database.queries import MonthBoundaryError, Repo
 from handlers.common import event_title_line, load_periods, period_header, require_level, respond
 from keyboards.main import btn, cancel_kb, confirm_kb, nav_row, periods_kb
 from services.audit import audit
@@ -222,11 +222,16 @@ async def month_set_closer(cb: CallbackQuery, repo: Repo, config: Config, actor:
     if period.closer is not None and period.closer.id == event.id:
         await show_month_card(cb, repo, config, key, notice="Это занятие уже последнее")
         return
-    custom_title = None
-    if period.closer is not None:
-        custom_title = period.closer.month_title
-        await repo.update_event(period.closer.id, closes_month=0, month_title=None)
-    await repo.update_event(event.id, closes_month=1, month_title=custom_title)
+    custom_title = period.closer.month_title if period.closer is not None else None
+    try:
+        await repo.set_month_closer(
+            event.id,
+            previous_closer_id=period.closer.id if period.closer is not None else None,
+            month_title=custom_title,
+        )
+    except MonthBoundaryError:
+        await answer_callback(cb, "Граница месяца уже изменилась. Откройте месяц ещё раз.", show_alert=True)
+        return
     action = "month.move" if period.closed else "month.close"
     await audit(
         repo,

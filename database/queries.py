@@ -41,6 +41,10 @@ class RoleTransferError(RuntimeError):
     """The chief seat or the recipient changed before the transfer was stored."""
 
 
+class MonthBoundaryError(RuntimeError):
+    """The month closer changed before both updates were stored."""
+
+
 class _TxAbort(Exception):
     def __init__(self, result: Any) -> None:
         self.result = result
@@ -166,6 +170,39 @@ class Repo:
         student = await self.get_student(new_id)
         assert student is not None
         return student
+
+    async def import_students(
+        self,
+        rows: list[tuple[str, int | None]],
+        joined_on: str,
+        created_by: int | None,
+    ) -> list[Student]:
+        """Insert the whole list in one transaction. Names that already exist are skipped."""
+        created_ids: list[int] = []
+        async with self.transaction():
+            for full_name, enrollment_year in rows:
+                if await self._student_name_taken_unlocked(full_name):
+                    continue
+                ts = to_iso(now_utc())
+                written = await self._write_unlocked(
+                    """
+                    INSERT INTO students (full_name, enrollment_year, joined_on, status, created_by, created_at, updated_at)
+                    VALUES (?, ?, ?, 'active', ?, ?, ?)
+                    """,
+                    (full_name.strip(), enrollment_year, joined_on, created_by, ts, ts),
+                )
+                created_ids.append(written.last_id)
+        created: list[Student] = []
+        for student_id in created_ids:
+            student = await self.get_student(student_id)
+            if student is not None:
+                created.append(student)
+        return created
+
+    async def _student_name_taken_unlocked(self, full_name: str) -> bool:
+        needle = " ".join(full_name.split()).casefold()
+        rows = await self._fetchall_unlocked("SELECT full_name FROM students")
+        return any(" ".join(str(row["full_name"]).split()).casefold() == needle for row in rows)
 
     async def get_student(self, student_id: int) -> Student | None:
         return _opt(Student, await self._fetchone("SELECT * FROM students WHERE id = ?", (student_id,)))
@@ -421,8 +458,57 @@ class Repo:
         await self._execute(f"UPDATE events SET {cols} WHERE id = ?", (*updates.values(), event_id))
         return await self.get_event(event_id)
 
-    async def delete_event(self, event_id: int) -> None:
-        await self.update_event(event_id, deleted_at=to_iso(now_utc()), closes_month=0)
+    async def set_month_closer(self, event_id: int, *, previous_closer_id: int | None, month_title: str | None) -> None:
+        """Move or set the month boundary. The old closer is cleared in the same transaction."""
+        ts = to_iso(now_utc())
+        async with self.transaction():
+            if previous_closer_id is not None and previous_closer_id != event_id:
+                cleared = await self._write_unlocked(
+                    """
+                    UPDATE events
+                    SET closes_month = 0, month_title = NULL, updated_at = ?
+                    WHERE id = ? AND deleted_at IS NULL AND closes_month = 1
+                    """,
+                    (ts, previous_closer_id),
+                )
+                if cleared.rowcount != 1:
+                    raise MonthBoundaryError()
+            closed = await self._write_unlocked(
+                """
+                UPDATE events
+                SET closes_month = 1, month_title = ?, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL AND closes_month = 0
+                """,
+                (month_title, ts, event_id),
+            )
+            if closed.rowcount != 1:
+                raise MonthBoundaryError()
+
+    async def delete_event(self, event_id: int, *, successor_id: int | None = None, month_title: str | None = None) -> None:
+        """Soft-delete an event. A successor, when given, becomes the closer in the same transaction."""
+        ts = to_iso(now_utc())
+        async with self.transaction():
+            if successor_id is not None:
+                shifted = await self._write_unlocked(
+                    """
+                    UPDATE events
+                    SET closes_month = 1, month_title = ?, updated_at = ?
+                    WHERE id = ? AND deleted_at IS NULL AND closes_month = 0
+                    """,
+                    (month_title, ts, successor_id),
+                )
+                if shifted.rowcount != 1:
+                    raise MonthBoundaryError()
+            deleted = await self._write_unlocked(
+                """
+                UPDATE events
+                SET deleted_at = ?, closes_month = 0, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (ts, ts, event_id),
+            )
+            if deleted.rowcount != 1:
+                raise MonthBoundaryError()
 
     # ------------------------------------------------------------- attendance
 
@@ -716,6 +802,10 @@ class Repo:
 
     # --------------------------------------------------------------- callbacks
 
+    async def callback_claimed(self, callback_id: str) -> bool:
+        row = await self._fetchone("SELECT 1 FROM callback_dedup WHERE callback_id = ?", (callback_id,))
+        return row is not None
+
     async def claim_callback(self, callback_id: str, telegram_id: int) -> bool:
         try:
             await self._execute(
@@ -724,7 +814,6 @@ class Repo:
             )
             return True
         except aiosqlite.IntegrityError:
-            await self.conn.rollback()
             return False
 
     async def cleanup_callbacks(self, before_iso: str) -> None:

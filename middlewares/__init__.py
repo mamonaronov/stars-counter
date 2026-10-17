@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -15,6 +16,11 @@ from services.roles import Actor
 from utils.telegram import is_stale_callback_error, is_transient_telegram_error
 
 logger = logging.getLogger(__name__)
+
+# Clicks still in a handler. A failed handler leaves the id out of the database,
+# so Telegram can deliver the same click again.
+_inflight_callbacks: set[str] = set()
+_inflight_lock = asyncio.Lock()
 
 
 class ContextMiddleware(BaseMiddleware):
@@ -122,9 +128,23 @@ class CallbackIdempotencyMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        callback_id = None
         if isinstance(event, CallbackQuery) and event.id and event.from_user:
             repo: Repo = data["repo"]
-            if not await repo.claim_callback(event.id, event.from_user.id):
-                await event.answer()
-                return None
-        return await handler(event, data)
+            async with _inflight_lock:
+                if event.id in _inflight_callbacks or await repo.callback_claimed(event.id):
+                    await event.answer()
+                    return None
+                _inflight_callbacks.add(event.id)
+                callback_id = event.id
+        try:
+            result = await handler(event, data)
+            if callback_id is not None and isinstance(event, CallbackQuery) and event.from_user:
+                try:
+                    await data["repo"].claim_callback(callback_id, event.from_user.id)
+                except Exception:
+                    logger.exception("Failed to remember callback %s", callback_id)
+            return result
+        finally:
+            if callback_id is not None:
+                _inflight_callbacks.discard(callback_id)
