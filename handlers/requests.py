@@ -162,6 +162,10 @@ async def new_request_text(message: Message, state: FSMContext, repo: Repo, conf
         await show_main(message, actor, config, repo)
         return
     req = await repo.create_request(actor.student.id, event.id, text)
+    if req is None:
+        await message.answer("По этому занятию уже есть необработанный запрос.")
+        await show_main(message, actor, config, repo)
+        return
     await audit(repo, actor, "request.create", entity_type="request", entity_id=req.id, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}", текст=text)
     notify = (
         f"📨 <b>Новый запрос</b> от {esc(actor.student.full_name)}\n"
@@ -208,7 +212,7 @@ REQUEST_PAGE = 8
 
 async def show_requests_list(target: CallbackQuery | Message, repo: Repo, *, resolved: bool = False, page: int = 0) -> None:
     if resolved:
-        items = [r for r in await repo.list_requests(status=None, limit=200) if r.status != "open"]
+        items = await repo.list_requests(status=None, closed_only=True, limit=200)
         title = "📁 <b>Обработанные запросы</b>"
         page_prefix = "rqhp"
     else:
@@ -295,14 +299,18 @@ async def approve_request(cb: CallbackQuery, repo: Repo, config: Config, bot: Bo
     if student is None or event is None or event.deleted_at:
         await answer_callback(cb, "Студент или занятие не найдены.", show_alert=True)
         return
-    if not student.counts_on(event.day):
-        await answer_callback(cb, "Студент не учитывается на эту дату, отметка не войдёт в процент. Запрос не закрыт.", show_alert=True)
-        return
-    req = await repo.resolve_request(req.id, "approved", actor.telegram_id, None)
-    if req is None:
+    approval = await repo.approve_request_with_attendance(req.id, actor.telegram_id)
+    if approval.code == "resolved":
         await answer_callback(cb, "Запрос уже обработан.", show_alert=True)
         return
-    changed = await repo.set_presence(event.id, student.id, True, actor.telegram_id)
+    if approval.code == "missing":
+        await answer_callback(cb, "Студент или занятие не найдены.", show_alert=True)
+        return
+    if approval.code == "not_counted" or approval.request is None:
+        await answer_callback(cb, "Студент не учитывается на эту дату, отметка не войдёт в процент. Запрос не закрыт.", show_alert=True)
+        return
+    req = approval.request
+    changed = approval.marked
     if changed:
         await audit(repo, actor, "attendance.mark", entity_type="event", entity_id=event.id, студент=student.full_name, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}", по_запросу=req.id)
     await audit(repo, actor, "request.approve", entity_type="request", entity_id=req.id, студент=student.full_name, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}")

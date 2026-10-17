@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 import aiosqlite
@@ -27,6 +29,42 @@ from utils.time import now_utc, to_iso
 logger = logging.getLogger(__name__)
 
 
+class RoleOccupiedError(RuntimeError):
+    """The chief seat already belongs to another active student."""
+
+    def __init__(self, role: str) -> None:
+        self.role = role
+        super().__init__(role)
+
+
+class RoleTransferError(RuntimeError):
+    """The chief seat or the recipient changed before the transfer was stored."""
+
+
+class _TxAbort(Exception):
+    def __init__(self, result: Any) -> None:
+        self.result = result
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationResult:
+    code: str
+    student: Student | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Approval:
+    code: str
+    request: Request | None = None
+    marked: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    last_id: int
+    rowcount: int
+
+
 def _opt(factory, row: aiosqlite.Row | None):
     return factory(**dict(row)) if row else None
 
@@ -43,19 +81,47 @@ class Repo:
     def conn(self) -> aiosqlite.Connection:
         return self.db.conn
 
+    @asynccontextmanager
+    async def transaction(self):
+        async with self.db.exclusive():
+            try:
+                async with self.conn.execute("BEGIN IMMEDIATE"):
+                    pass
+                yield
+                await self.conn.commit()
+            except BaseException:
+                await self.db._rollback()
+                raise
+
     async def _fetchone(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
+        async with self.db.exclusive():
+            return await self._fetchone_unlocked(sql, params)
+
+    async def _fetchone_unlocked(self, sql: str, params: tuple = ()) -> aiosqlite.Row | None:
         async with self.conn.execute(sql, params) as cur:
             return await cur.fetchone()
 
     async def _fetchall(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
+        async with self.db.exclusive():
+            return await self._fetchall_unlocked(sql, params)
+
+    async def _fetchall_unlocked(self, sql: str, params: tuple = ()) -> list[aiosqlite.Row]:
         async with self.conn.execute(sql, params) as cur:
             return list(await cur.fetchall())
 
     async def _execute(self, sql: str, params: tuple = ()) -> int:
+        written = await self._write(sql, params)
+        return written.last_id
+
+    async def _write(self, sql: str, params: tuple = ()) -> WriteResult:
+        async with self.db.exclusive():
+            written = await self._write_unlocked(sql, params)
+            await self.conn.commit()
+            return written
+
+    async def _write_unlocked(self, sql: str, params: tuple = ()) -> WriteResult:
         async with self.conn.execute(sql, params) as cur:
-            last_id = cur.lastrowid
-        await self.conn.commit()
-        return int(last_id or 0)
+            return WriteResult(int(cur.lastrowid or 0), int(cur.rowcount))
 
     # ------------------------------------------------------------------ users
 
@@ -123,20 +189,20 @@ class Repo:
         return students
 
     async def list_students_with_roles(self) -> list[Student]:
-        return _many(
+        students = _many(
             Student,
-            await self._fetchall(
-                "SELECT * FROM students WHERE role IS NOT NULL AND status = 'active' ORDER BY full_name COLLATE NOCASE"
-            ),
+            await self._fetchall("SELECT * FROM students WHERE role IS NOT NULL AND status = 'active'"),
         )
+        students.sort(key=lambda s: (s.full_name.casefold(), s.id))
+        return students
 
     async def list_verified_students(self) -> list[Student]:
-        return _many(
+        students = _many(
             Student,
-            await self._fetchall(
-                "SELECT * FROM students WHERE telegram_id IS NOT NULL AND status = 'active' ORDER BY full_name COLLATE NOCASE"
-            ),
+            await self._fetchall("SELECT * FROM students WHERE telegram_id IS NOT NULL AND status = 'active'"),
         )
+        students.sort(key=lambda s: (s.full_name.casefold(), s.id))
+        return students
 
     async def find_student_by_name(self, full_name: str, *, active_only: bool = True) -> Student | None:
         needle = " ".join(full_name.split()).casefold()
@@ -162,7 +228,35 @@ class Repo:
         return await self.update_student(student_id, status="active", left_on=None)
 
     async def set_role(self, student_id: int, role: str | None) -> Student | None:
-        return await self.update_student(student_id, role=role)
+        try:
+            return await self.update_student(student_id, role=role)
+        except aiosqlite.IntegrityError as exc:
+            if role and "UNIQUE" in str(exc).upper():
+                raise RoleOccupiedError(role) from exc
+            raise
+
+    async def transfer_role(self, from_student_id: int, to_student_id: int, role: str, demoted_role: str) -> None:
+        """Hand a chief seat over. Both updates commit together or not at all."""
+        ts = to_iso(now_utc())
+        async with self.transaction():
+            demoted = await self._write_unlocked(
+                """
+                UPDATE students SET role = ?, updated_at = ?
+                WHERE id = ? AND role = ? AND status = 'active'
+                """,
+                (demoted_role, ts, from_student_id, role),
+            )
+            if demoted.rowcount != 1:
+                raise RoleTransferError()
+            promoted = await self._write_unlocked(
+                """
+                UPDATE students SET role = ?, updated_at = ?
+                WHERE id = ? AND status = 'active' AND telegram_id IS NOT NULL AND id != ?
+                """,
+                (role, ts, to_student_id, from_student_id),
+            )
+            if promoted.rowcount != 1:
+                raise RoleTransferError()
 
     async def bind_telegram(self, student_id: int, telegram_id: int) -> Student | None:
         return await self.update_student(student_id, telegram_id=telegram_id, verified_at=to_iso(now_utc()))
@@ -174,15 +268,16 @@ class Repo:
 
     async def create_verification_link(self, student_id: int, created_by: int) -> VerificationLink:
         ts = to_iso(now_utc())
-        await self._execute(
-            "UPDATE verification_links SET revoked_at = ? WHERE student_id = ? AND used_at IS NULL AND revoked_at IS NULL",
-            (ts, student_id),
-        )
         token = secrets.token_urlsafe(18)
-        await self._execute(
-            "INSERT INTO verification_links (token, student_id, created_by, created_at) VALUES (?, ?, ?, ?)",
-            (token, student_id, created_by, ts),
-        )
+        async with self.transaction():
+            await self._write_unlocked(
+                "UPDATE verification_links SET revoked_at = ? WHERE student_id = ? AND used_at IS NULL AND revoked_at IS NULL",
+                (ts, student_id),
+            )
+            await self._write_unlocked(
+                "INSERT INTO verification_links (token, student_id, created_by, created_at) VALUES (?, ?, ?, ?)",
+                (token, student_id, created_by, ts),
+            )
         link = await self.get_verification_link(token)
         assert link is not None
         return link
@@ -193,11 +288,61 @@ class Repo:
             await self._fetchone("SELECT * FROM verification_links WHERE token = ?", (token,)),
         )
 
-    async def use_verification_link(self, token: str, used_by: int) -> None:
-        await self._execute(
-            "UPDATE verification_links SET used_at = ?, used_by = ? WHERE token = ?",
+    async def use_verification_link(self, token: str, used_by: int) -> bool:
+        written = await self._write(
+            """
+            UPDATE verification_links SET used_at = ?, used_by = ?
+            WHERE token = ? AND used_at IS NULL AND revoked_at IS NULL
+            """,
             (to_iso(now_utc()), used_by, token),
         )
+        return written.rowcount == 1
+
+    async def redeem_verification(self, token: str, telegram_id: int) -> VerificationResult:
+        """Bind the student and consume the link, or leave both unchanged."""
+        try:
+            async with self.transaction():
+                student_id = await self._redeem_unlocked(token, telegram_id)
+        except _TxAbort as exc:
+            return exc.result
+        student = await self.get_student(student_id)
+        return VerificationResult("ok", student)
+
+    async def _redeem_unlocked(self, token: str, telegram_id: int) -> int:
+        link = _opt(VerificationLink, await self._fetchone_unlocked("SELECT * FROM verification_links WHERE token = ?", (token,)))
+        if link is None:
+            raise _TxAbort(VerificationResult("missing"))
+        if link.revoked_at or link.used_at:
+            raise _TxAbort(VerificationResult("used"))
+        student = _opt(Student, await self._fetchone_unlocked("SELECT * FROM students WHERE id = ?", (link.student_id,)))
+        if student is None or not student.is_active:
+            raise _TxAbort(VerificationResult("inactive"))
+        if student.telegram_id is not None and student.telegram_id != telegram_id:
+            raise _TxAbort(VerificationResult("taken"))
+        existing = _opt(Student, await self._fetchone_unlocked("SELECT * FROM students WHERE telegram_id = ?", (telegram_id,)))
+        if existing is not None and existing.id != student.id:
+            code = "linked_removed" if not existing.is_active else "linked_other"
+            raise _TxAbort(VerificationResult(code, existing))
+        ts = to_iso(now_utc())
+        claimed = await self._write_unlocked(
+            """
+            UPDATE verification_links SET used_at = ?, used_by = ?
+            WHERE token = ? AND used_at IS NULL AND revoked_at IS NULL
+            """,
+            (ts, telegram_id, token),
+        )
+        if claimed.rowcount != 1:
+            raise _TxAbort(VerificationResult("used"))
+        bound = await self._write_unlocked(
+            """
+            UPDATE students SET telegram_id = ?, verified_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'active' AND (telegram_id IS NULL OR telegram_id = ?)
+            """,
+            (telegram_id, ts, ts, student.id, telegram_id),
+        )
+        if bound.rowcount != 1:
+            raise _TxAbort(VerificationResult("taken"))
+        return student.id
 
     # -------------------------------------------------------------- templates
 
@@ -214,10 +359,12 @@ class Repo:
         return _opt(EventTemplate, await self._fetchone("SELECT * FROM event_templates WHERE id = ?", (template_id,)))
 
     async def list_templates(self) -> list[EventTemplate]:
-        return _many(
+        templates = _many(
             EventTemplate,
-            await self._fetchall("SELECT * FROM event_templates WHERE archived_at IS NULL ORDER BY title COLLATE NOCASE, id"),
+            await self._fetchall("SELECT * FROM event_templates WHERE archived_at IS NULL"),
         )
+        templates.sort(key=lambda item: (item.title.casefold(), item.id))
+        return templates
 
     async def archive_template(self, template_id: int) -> None:
         await self._execute("UPDATE event_templates SET archived_at = ? WHERE id = ?", (to_iso(now_utc()), template_id))
@@ -318,19 +465,44 @@ class Repo:
 
     async def set_presence(self, event_id: int, student_id: int, present: bool, marked_by: int) -> bool:
         """Returns True if the state changed."""
-        exists = await self.is_present(event_id, student_id)
-        if present and not exists:
-            await self._execute(
-                "INSERT INTO attendance (event_id, student_id, marked_by, marked_at) VALUES (?, ?, ?, ?)",
+        if present:
+            written = await self._write(
+                """
+                INSERT INTO attendance (event_id, student_id, marked_by, marked_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(event_id, student_id) DO NOTHING
+                """,
                 (event_id, student_id, marked_by, to_iso(now_utc())),
             )
-            return True
-        if not present and exists:
-            await self._execute(
-                "DELETE FROM attendance WHERE event_id = ? AND student_id = ?", (event_id, student_id)
+        else:
+            written = await self._write(
+                "DELETE FROM attendance WHERE event_id = ? AND student_id = ?",
+                (event_id, student_id),
             )
-            return True
-        return False
+        return written.rowcount == 1
+
+    async def toggle_presence(self, event_id: int, student_id: int, marked_by: int, *, allow_mark: bool) -> tuple[bool, bool]:
+        """Flip presence in one transaction. Returns (changed, is_present)."""
+        changed = False
+        present = False
+        async with self.transaction():
+            deleted = await self._write_unlocked(
+                "DELETE FROM attendance WHERE event_id = ? AND student_id = ?",
+                (event_id, student_id),
+            )
+            if deleted.rowcount > 0:
+                changed = True
+                present = False
+            elif allow_mark:
+                inserted = await self._write_unlocked(
+                    """
+                    INSERT INTO attendance (event_id, student_id, marked_by, marked_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(event_id, student_id) DO NOTHING
+                    """,
+                    (event_id, student_id, marked_by, to_iso(now_utc())),
+                )
+                present = True
+                changed = inserted.rowcount == 1
+        return changed, present
 
     # ---------------------------------------------------------------- excuses
 
@@ -379,23 +551,36 @@ class Repo:
 
     # --------------------------------------------------------------- requests
 
-    async def create_request(self, student_id: int, event_id: int, text: str) -> Request:
-        new_id = await self._execute(
-            "INSERT INTO requests (student_id, event_id, text, status, created_at) VALUES (?, ?, ?, 'open', ?)",
-            (student_id, event_id, text.strip(), to_iso(now_utc())),
-        )
-        req = await self.get_request(new_id)
-        assert req is not None
-        return req
+    async def create_request(self, student_id: int, event_id: int, text: str) -> Request | None:
+        """None when this student already has an open request for the event."""
+        try:
+            new_id = await self._execute(
+                "INSERT INTO requests (student_id, event_id, text, status, created_at) VALUES (?, ?, ?, 'open', ?)",
+                (student_id, event_id, text.strip(), to_iso(now_utc())),
+            )
+        except aiosqlite.IntegrityError as exc:
+            if "UNIQUE" in str(exc).upper():
+                return None
+            raise
+        return await self.get_request(new_id)
 
     async def get_request(self, request_id: int) -> Request | None:
         return _opt(Request, await self._fetchone("SELECT * FROM requests WHERE id = ?", (request_id,)))
 
-    async def list_requests(self, *, status: str | None = "open", student_id: int | None = None, limit: int = 200) -> list[Request]:
+    async def list_requests(
+        self,
+        *,
+        status: str | None = "open",
+        closed_only: bool = False,
+        student_id: int | None = None,
+        limit: int = 200,
+    ) -> list[Request]:
         sql = "SELECT * FROM requests"
         clauses: list[str] = []
         params: list[Any] = []
-        if status:
+        if closed_only:
+            clauses.append("status != 'open'")
+        elif status:
             clauses.append("status = ?")
             params.append(status)
         if student_id is not None:
@@ -420,19 +605,56 @@ class Repo:
 
     async def resolve_request(self, request_id: int, status: str, resolved_by: int, comment: str | None) -> Request | None:
         """Close an open request. Returns None when another marker already resolved it."""
-        async with self.conn.execute(
+        written = await self._write(
             """
             UPDATE requests
             SET status = ?, resolved_by = ?, resolved_at = ?, resolution_comment = ?
             WHERE id = ? AND status = 'open'
             """,
             (status, resolved_by, to_iso(now_utc()), comment, request_id),
-        ) as cur:
-            changed = cur.rowcount
-        await self.conn.commit()
-        if not changed:
+        )
+        if written.rowcount != 1:
             return None
         return await self.get_request(request_id)
+
+    async def approve_request_with_attendance(self, request_id: int, resolved_by: int) -> Approval:
+        """Mark the student and close the request in one transaction."""
+        try:
+            async with self.transaction():
+                marked = await self._approve_unlocked(request_id, resolved_by)
+        except _TxAbort as exc:
+            return exc.result
+        return Approval("ok", await self.get_request(request_id), marked)
+
+    async def _approve_unlocked(self, request_id: int, resolved_by: int) -> bool:
+        req = _opt(Request, await self._fetchone_unlocked("SELECT * FROM requests WHERE id = ?", (request_id,)))
+        if req is None or req.status != "open":
+            raise _TxAbort(Approval("resolved"))
+        student = _opt(Student, await self._fetchone_unlocked("SELECT * FROM students WHERE id = ?", (req.student_id,)))
+        event = _opt(Event, await self._fetchone_unlocked("SELECT * FROM events WHERE id = ?", (req.event_id,)))
+        if student is None or event is None or event.deleted_at:
+            raise _TxAbort(Approval("missing"))
+        if not student.counts_on(event.day):
+            raise _TxAbort(Approval("not_counted"))
+        ts = to_iso(now_utc())
+        inserted = await self._write_unlocked(
+            """
+            INSERT INTO attendance (event_id, student_id, marked_by, marked_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(event_id, student_id) DO NOTHING
+            """,
+            (event.id, student.id, resolved_by, ts),
+        )
+        closed = await self._write_unlocked(
+            """
+            UPDATE requests
+            SET status = 'approved', resolved_by = ?, resolved_at = ?, resolution_comment = NULL
+            WHERE id = ? AND status = 'open'
+            """,
+            (resolved_by, ts, request_id),
+        )
+        if closed.rowcount != 1:
+            raise _TxAbort(Approval("resolved"))
+        return inserted.rowcount == 1
 
     # ------------------------------------------------------------------ audit
 

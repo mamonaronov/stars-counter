@@ -25,28 +25,28 @@ VERIFY_PREFIX = "v_"
 
 
 async def _verify(message: Message, token: str, repo: Repo, config: Config, actor: Actor) -> str:
-    link = await repo.get_verification_link(token)
-    if link is None:
+    result = await repo.redeem_verification(token, actor.telegram_id)
+    if result.code == "missing":
         return "Ссылка не найдена. Попросите отмечающего прислать новую."
-    if link.revoked_at or link.used_at:
+    if result.code == "used":
         return "Эта ссылка уже использована или отозвана. Попросите отмечающего прислать новую."
-    student = await repo.get_student(link.student_id)
-    if student is None or not student.is_active:
+    if result.code == "inactive":
         return "Студент по этой ссылке больше не числится в группе."
-    if student.telegram_id is not None and student.telegram_id != actor.telegram_id:
+    if result.code == "taken":
         return "К этому студенту уже привязан другой Telegram-аккаунт. Обратитесь к отмечающему."
-    if actor.student is not None and actor.student.id != student.id:
-        if not actor.student.is_active:
+    if result.code in {"linked_removed", "linked_other"} and result.student is not None:
+        if result.code == "linked_removed":
             return (
-                f"Ваш Telegram привязан к удалённой карточке «{esc(actor.student.full_name)}». "
+                f"Ваш Telegram привязан к удалённой карточке «{esc(result.student.full_name)}». "
                 "Попросите восстановить её: новая карточка не получит старую историю посещений."
             )
         return (
-            f"Ваш аккаунт уже привязан к студенту «{esc(actor.student.full_name)}». "
+            f"Ваш аккаунт уже привязан к студенту «{esc(result.student.full_name)}». "
             "Чтобы перепривязать, обратитесь к отмечающему."
         )
-    await repo.bind_telegram(student.id, actor.telegram_id)
-    await repo.use_verification_link(token, actor.telegram_id)
+    student = result.student
+    if student is None:
+        return "Ссылка не найдена. Попросите отмечающего прислать новую."
     new_actor = await build_actor(repo, config, actor.telegram_id)
     await audit(
         repo,

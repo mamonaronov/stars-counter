@@ -205,14 +205,15 @@ async def content_fingerprint(db: Database) -> str:
         f"SELECT key, value FROM system_info WHERE key NOT IN ({placeholders}) ORDER BY key",
     )
     params: tuple = ()
-    for sql in queries:
-        bind = _VOLATILE_SYSTEM if "system_info" in sql else params
-        async with db.conn.execute(sql, bind) as cur:
-            rows = await cur.fetchall()
-        digest.update(sql.encode())
-        for row in rows:
-            digest.update(repr(tuple(row)).encode())
-            digest.update(b"\n")
+    async with db.exclusive():
+        for sql in queries:
+            bind = _VOLATILE_SYSTEM if "system_info" in sql else params
+            async with db.conn.execute(sql, bind) as cur:
+                rows = await cur.fetchall()
+            digest.update(sql.encode())
+            for row in rows:
+                digest.update(repr(tuple(row)).encode())
+                digest.update(b"\n")
     return digest.hexdigest()
 
 

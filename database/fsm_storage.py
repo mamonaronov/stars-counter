@@ -27,21 +27,24 @@ class SqliteStorage(BaseStorage):
         self.db = db
 
     async def _fetchone(self, sql: str, params: tuple) -> Any:
-        async with self.db.conn.execute(sql, params) as cur:
-            return await cur.fetchone()
+        async with self.db.exclusive():
+            async with self.db.conn.execute(sql, params) as cur:
+                return await cur.fetchone()
 
     async def set_state(self, key: StorageKey, state: StateType = None) -> None:
         bot_id, chat_id, user_id, destiny = _key_tuple(key)
-        await self.db.conn.execute(
-            """
-            INSERT INTO fsm_storage (bot_id, chat_id, user_id, destiny, state, data, updated_at)
-            VALUES (?, ?, ?, ?, ?, '{}', ?)
-            ON CONFLICT(bot_id, chat_id, user_id, destiny) DO UPDATE SET
-                state = excluded.state, updated_at = excluded.updated_at
-            """,
-            (bot_id, chat_id, user_id, destiny, _state_value(state), to_iso(now_utc())),
-        )
-        await self.db.conn.commit()
+        async with self.db.exclusive():
+            async with self.db.conn.execute(
+                """
+                INSERT INTO fsm_storage (bot_id, chat_id, user_id, destiny, state, data, updated_at)
+                VALUES (?, ?, ?, ?, ?, '{}', ?)
+                ON CONFLICT(bot_id, chat_id, user_id, destiny) DO UPDATE SET
+                    state = excluded.state, updated_at = excluded.updated_at
+                """,
+                (bot_id, chat_id, user_id, destiny, _state_value(state), to_iso(now_utc())),
+            ):
+                pass
+            await self.db.conn.commit()
 
     async def get_state(self, key: StorageKey) -> str | None:
         bot_id, chat_id, user_id, destiny = _key_tuple(key)
@@ -54,16 +57,18 @@ class SqliteStorage(BaseStorage):
     async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
         bot_id, chat_id, user_id, destiny = _key_tuple(key)
         payload = json.dumps(dict(data), ensure_ascii=False)
-        await self.db.conn.execute(
-            """
-            INSERT INTO fsm_storage (bot_id, chat_id, user_id, destiny, state, data, updated_at)
-            VALUES (?, ?, ?, ?, NULL, ?, ?)
-            ON CONFLICT(bot_id, chat_id, user_id, destiny) DO UPDATE SET
-                data = excluded.data, updated_at = excluded.updated_at
-            """,
-            (bot_id, chat_id, user_id, destiny, payload, to_iso(now_utc())),
-        )
-        await self.db.conn.commit()
+        async with self.db.exclusive():
+            async with self.db.conn.execute(
+                """
+                INSERT INTO fsm_storage (bot_id, chat_id, user_id, destiny, state, data, updated_at)
+                VALUES (?, ?, ?, ?, NULL, ?, ?)
+                ON CONFLICT(bot_id, chat_id, user_id, destiny) DO UPDATE SET
+                    data = excluded.data, updated_at = excluded.updated_at
+                """,
+                (bot_id, chat_id, user_id, destiny, payload, to_iso(now_utc())),
+            ):
+                pass
+            await self.db.conn.commit()
 
     async def get_data(self, key: StorageKey) -> dict[str, Any]:
         bot_id, chat_id, user_id, destiny = _key_tuple(key)

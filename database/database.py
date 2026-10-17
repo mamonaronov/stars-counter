@@ -6,6 +6,7 @@ import asyncio
 import logging
 import shutil
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +62,26 @@ def copy_sqlite_bundle(src: Path, dest: Path) -> None:
             shutil.copy2(extra, sqlite_sidecar(dest, suffix))
 
 
+def split_sql(script: str) -> list[str]:
+    """Split a migration script into statements. Line comments start with ``--``."""
+    statements: list[str] = []
+    chunk: list[str] = []
+    for line in script.splitlines():
+        code = line.split("--", 1)[0]
+        if not code.strip():
+            continue
+        chunk.append(code)
+        if code.rstrip().endswith(";"):
+            statement = " ".join(part.strip() for part in chunk).strip().rstrip(";").strip()
+            if statement:
+                statements.append(statement)
+            chunk = []
+    tail = " ".join(part.strip() for part in chunk).strip().rstrip(";").strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
 def install_sqlite_file(source: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".incoming")
@@ -80,6 +101,9 @@ class Database:
         self.backup_dir = config.backup_path
         self._conn: aiosqlite.Connection | None = None
         self.vpn_db: VpnDatabase | None = None
+        # One connection, many tasks. Hold this across every statement and across
+        # multi-statement transactions so a rollback cannot discard another task's write.
+        self._lock = asyncio.Lock()
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -87,10 +111,23 @@ class Database:
             raise DatabaseError("Database is not connected")
         return self._conn
 
+    @asynccontextmanager
+    async def exclusive(self):
+        """Serialize every use of the main connection."""
+        async with self._lock:
+            yield
+
+    async def _rollback(self) -> None:
+        try:
+            await self.conn.rollback()
+        except Exception:
+            logger.debug("SQLite rollback skipped", exc_info=True)
+
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(self.path)
+        # Autocommit: transactions start only at an explicit BEGIN.
+        conn = await aiosqlite.connect(self.path, isolation_level=None)
         conn.row_factory = aiosqlite.Row
         try:
             await self._apply_pragmas(conn)
@@ -142,14 +179,19 @@ class Database:
             logger.exception("integrity_check failed")
             return False
 
-    async def user_version(self) -> int:
+    async def _user_version_unlocked(self) -> int:
         async with self.conn.execute("PRAGMA user_version") as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
 
+    async def user_version(self) -> int:
+        async with self._lock:
+            return await self._user_version_unlocked()
+
     async def set_user_version(self, version: int) -> None:
-        await self.conn.execute(f"PRAGMA user_version={int(version)}")
-        await self.conn.commit()
+        async with self._lock:
+            await self.conn.execute(f"PRAGMA user_version={int(version)}")
+            await self.conn.commit()
 
     def _migration_files(self) -> list[tuple[int, Path]]:
         files: list[tuple[int, Path]] = []
@@ -161,32 +203,48 @@ class Database:
                 files.append((int(prefix), path))
         return files
 
+    async def _apply_migration_unlocked(self, version: int, sql: str) -> None:
+        """Apply one script and bump user_version in a single transaction."""
+        try:
+            async with self.conn.execute("BEGIN IMMEDIATE"):
+                pass
+            for statement in split_sql(sql):
+                if statement.upper().startswith("PRAGMA FOREIGN_KEYS"):
+                    continue
+                await self.conn.execute(statement)
+            await self.conn.execute(f"PRAGMA user_version={int(version)}")
+            await self.conn.commit()
+        except Exception as exc:
+            await self._rollback()
+            logger.exception("Migration %s failed", version)
+            raise DatabaseError(f"Migration {version} failed") from exc
+
     async def migrate(self) -> None:
-        current = await self.user_version()
-        required = self.config.required_db_version
-        logger.info("DB version current=%s required=%s", current, required)
-        if current > required:
-            raise DatabaseError(f"Database version {current} is newer than application {required}")
-        if current == required:
-            return
-        files = [(ver, path) for ver, path in self._migration_files() if ver > current]
-        if not files:
-            raise DatabaseError(f"No migrations to go from {current} to {required}")
+        async with self._lock:
+            current = await self._user_version_unlocked()
+            required = self.config.required_db_version
+            logger.info("DB version current=%s required=%s", current, required)
+            if current > required:
+                raise DatabaseError(f"Database version {current} is newer than application {required}")
+            if current == required:
+                return
+            files = [(ver, path) for ver, path in self._migration_files() if ver > current]
+            if not files:
+                raise DatabaseError(f"No migrations to go from {current} to {required}")
         if current > 0:
             await self.backup(prefix="pre_migrate")
-        for version, path in files:
-            sql = path.read_text(encoding="utf-8")
-            logger.info("Applying migration %s", path.name)
-            try:
-                await self.conn.executescript(sql)
-                await self.set_user_version(version)
-            except Exception:
-                logger.exception("Migration %s failed", path.name)
-                raise DatabaseError(f"Migration {path.name} failed") from None
-        final = await self.user_version()
-        if final < required:
-            raise DatabaseError(f"Migrations finished at {final}, required {required}")
-        logger.info("Migrations complete, version=%s", final)
+        async with self._lock:
+            now = await self._user_version_unlocked()
+            if now != current:
+                raise DatabaseError(f"Database version changed from {current} to {now} before migration")
+            for version, path in files:
+                sql = path.read_text(encoding="utf-8")
+                logger.info("Applying migration %s", path.name)
+                await self._apply_migration_unlocked(version, sql)
+            final = await self._user_version_unlocked()
+            if final < required:
+                raise DatabaseError(f"Migrations finished at {final}, required {required}")
+            logger.info("Migrations complete, version=%s", final)
 
     async def _close_backup_conn(self, conn: aiosqlite.Connection | None) -> None:
         if conn is None:
@@ -227,15 +285,19 @@ class Database:
         dest_path = self.backup_dir / _backup_name(prefix)
         try:
             await self.backup_to(dest_path)
-            await self.set_system("last_backup_at", to_iso(now_utc()))
-            await self.set_system("last_backup_path", str(dest_path))
-            logger.info("Backup created: %s", dest_path.name)
-            self._rotate_backups()
-            return dest_path
         except Exception:
             dest_path.unlink(missing_ok=True)
             logger.exception("Backup failed")
             raise
+        try:
+            await self.set_system("last_backup_at", to_iso(now_utc()))
+            await self.set_system("last_backup_path", str(dest_path))
+        except Exception:
+            logger.exception("Backup %s is on disk, but system_info was not updated", dest_path.name)
+            raise
+        logger.info("Backup created: %s", dest_path.name)
+        self._rotate_backups()
+        return dest_path
 
     def _rotate_backups(self) -> None:
         files = list_sqlite_backups(self.backup_dir)
@@ -253,24 +315,28 @@ class Database:
 
     async def get_system(self, key: str) -> str | None:
         try:
-            async with self.conn.execute("SELECT value FROM system_info WHERE key = ?", (key,)) as cur:
-                row = await cur.fetchone()
+            async with self._lock:
+                async with self.conn.execute("SELECT value FROM system_info WHERE key = ?", (key,)) as cur:
+                    row = await cur.fetchone()
             return str(row[0]) if row and row[0] is not None else None
         except Exception:
             return None
 
     async def set_system(self, key: str, value: str) -> None:
-        try:
-            await self.conn.execute(
-                """
-                INSERT INTO system_info(key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-                """,
-                (key, value, to_iso(now_utc())),
-            )
-            await self.conn.commit()
-        except Exception:
-            await self.conn.rollback()
+        async with self._lock:
+            try:
+                await self.conn.execute(
+                    """
+                    INSERT INTO system_info(key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (key, value, to_iso(now_utc())),
+                )
+                await self.conn.commit()
+            except Exception:
+                logger.exception("Failed to write system_info key %s", key)
+                await self._rollback()
+                raise
 
     async def quarantine_damaged(self) -> Path:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

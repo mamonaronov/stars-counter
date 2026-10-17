@@ -290,8 +290,13 @@ async def toggle_attendance(cb: CallbackQuery, repo: Repo, actor: Actor | None) 
     if event is None or event.deleted_at or student is None:
         await answer_callback(cb, "Занятие или студент не найдены", show_alert=True)
         return
-    present_now = await repo.is_present(event.id, student.id)
-    if not student.counts_on(event.day) and not present_now:
+    changed, present = await repo.toggle_presence(
+        event.id,
+        student.id,
+        actor.telegram_id,
+        allow_mark=student.counts_on(event.day),
+    )
+    if not changed and not present and not student.counts_on(event.day):
         await answer_callback(
             cb,
             f"{student.full_name} не учитывается на {event.day.strftime('%d.%m.%Y')}: "
@@ -299,18 +304,17 @@ async def toggle_attendance(cb: CallbackQuery, repo: Repo, actor: Actor | None) 
             show_alert=True,
         )
         return
-    changed = await repo.set_presence(event.id, student.id, not present_now, actor.telegram_id)
     if changed:
         await audit(
             repo,
             actor,
-            "attendance.unmark" if present_now else "attendance.mark",
+            "attendance.unmark" if not present else "attendance.mark",
             entity_type="event",
             entity_id=event.id,
             студент=student.full_name,
             занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}",
         )
-    await show_marking(cb, repo, event, notice=f"{'Снято' if present_now else 'Отмечено'}: {short_name(student.full_name)}")
+    await show_marking(cb, repo, event, notice=f"{'Отмечено' if present else 'Снято'}: {short_name(student.full_name)}")
 
 
 # ---------------------------------------------------------------- list

@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Config
-from database.queries import Repo
+from database.queries import Repo, RoleOccupiedError, RoleTransferError
 from handlers.common import PICK_FILTER_ONLY_VERIFIED, require_level, respond, show_main, show_student_picker
 from keyboards.main import btn, confirm_kb, nav_row
 from services.audit import audit
@@ -116,7 +116,11 @@ async def assign_role(cb: CallbackQuery, repo: Repo, bot: Bot, actor: Actor | No
         await answer_callback(cb, "Недостаточно прав для этой роли.", show_alert=True)
         return
     old = student.role
-    await repo.set_role(student.id, role)
+    try:
+        await repo.set_role(student.id, role)
+    except RoleOccupiedError:
+        await answer_callback(cb, f"Роль «{ROLE_TITLES[role]}» уже занята. Её можно только передать.", show_alert=True)
+        return
     await audit(repo, actor, "role.assign", entity_type="student", entity_id=student.id, студент=student.full_name, было=role_title(old) if old else "нет", стало=ROLE_TITLES[role])
     if student.telegram_id:
         await safe_send_message(bot, student.telegram_id, f"🎖 Вам назначена роль <b>{ROLE_TITLES[role]}</b> ({esc(actor.display_name)}). Нажмите /menu.")
@@ -191,8 +195,11 @@ async def transfer_do(cb: CallbackQuery, state: FSMContext, repo: Repo, config: 
         await answer_callback(cb, "Этому студенту передать роль нельзя.", show_alert=True)
         return
     role = actor.transferable_role
-    await repo.set_role(student.id, role)
-    await repo.set_role(actor.student.id, role_after_transfer(role))
+    try:
+        await repo.transfer_role(actor.student.id, student.id, role, role_after_transfer(role))
+    except RoleTransferError:
+        await answer_callback(cb, "Передать роль не удалось. Обновите список и попробуйте ещё раз.", show_alert=True)
+        return
     await audit(repo, actor, "role.transfer", entity_type="student", entity_id=student.id, роль=ROLE_TITLES[role], кому=student.full_name)
     if student.telegram_id:
         await safe_send_message(bot, student.telegram_id, f"🎖 {esc(actor.display_name)} передал(а) вам роль <b>{ROLE_TITLES[role]}</b>. Нажмите /menu.")

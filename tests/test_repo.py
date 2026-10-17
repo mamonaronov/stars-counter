@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from database.database import Database
-from database.queries import Repo
+from database.database import Database, DatabaseError, split_sql
+from database.queries import Approval, Repo, RoleOccupiedError, RoleTransferError
 from services.audit import audit
 from tests.conftest import actor, make_config
 
@@ -111,6 +111,143 @@ async def test_audit_records_actor_role(repo: Repo):
     assert entry.actor_name == "Отмечающий Тест"
     assert "Иванов Иван" in (entry.details or "")
     assert await repo.count_audit(entity_type="student", entity_id=5) == 1
+
+
+async def test_names_sort_with_cyrillic_casefold(repo: Repo):
+    yakov = await repo.create_student("Яковлев Яков", 2023, "2026-09-01", 1)
+    anna = await repo.create_student("антонов антон", 2023, "2026-09-01", 1)
+    await repo.bind_telegram(yakov.id, 11)
+    await repo.bind_telegram(anna.id, 12)
+    await repo.set_role(yakov.id, "marker")
+    await repo.set_role(anna.id, "marker")
+    assert [s.id for s in await repo.list_students_with_roles()] == [anna.id, yakov.id]
+    assert [s.id for s in await repo.list_verified_students()] == [anna.id, yakov.id]
+    later = await repo.create_template("ярмарка", "free", None, 1)
+    earlier = await repo.create_template("Актовый", "mandatory", None, 1)
+    assert [item.id for item in await repo.list_templates()] == [earlier.id, later.id]
+
+
+async def test_verification_redeem_does_not_overwrite_another_account(repo: Repo):
+    student = await repo.create_student("Иванов Иван", 2023, "2026-09-01", 1)
+    other = await repo.create_student("Петров Пётр", 2023, "2026-09-01", 1)
+    first = await repo.create_verification_link(student.id, 1)
+    ok = await repo.redeem_verification(first.token, 777)
+    assert ok.code == "ok" and ok.student is not None and ok.student.telegram_id == 777
+    assert (await repo.redeem_verification(first.token, 778)).code == "used"
+    second = await repo.create_verification_link(student.id, 1)
+    assert (await repo.redeem_verification(second.token, 778)).code == "taken"
+    assert (await repo.get_student(student.id)).telegram_id == 777
+    foreign = await repo.create_verification_link(other.id, 1)
+    linked = await repo.redeem_verification(foreign.token, 777)
+    assert linked.code == "linked_other" and linked.student is not None and linked.student.id == student.id
+    assert (await repo.get_student(other.id)).telegram_id is None
+    assert (await repo.get_verification_link(foreign.token)).used_at is None
+
+
+async def test_chief_role_is_unique_and_transfer_is_atomic(repo: Repo):
+    chief = await repo.create_student("Главный Отмечающий", 2023, "2026-09-01", 1)
+    marker = await repo.create_student("Обычный Отмечающий", 2023, "2026-09-01", 1)
+    removed = await repo.create_student("Удалённый Студент", 2023, "2026-09-01", 1)
+    await repo.bind_telegram(chief.id, 10)
+    await repo.bind_telegram(marker.id, 11)
+    await repo.bind_telegram(removed.id, 12)
+    await repo.set_role(chief.id, "chief_marker")
+    await repo.remove_student(removed.id, "2026-10-01")
+    with pytest.raises(RoleOccupiedError):
+        await repo.set_role(marker.id, "chief_marker")
+    with pytest.raises(RoleTransferError):
+        await repo.transfer_role(chief.id, removed.id, "chief_marker", "marker")
+    assert (await repo.get_student(chief.id)).role == "chief_marker"
+    await repo.transfer_role(chief.id, marker.id, "chief_marker", "marker")
+    assert (await repo.get_student(marker.id)).role == "chief_marker"
+    assert (await repo.get_student(chief.id)).role == "marker"
+
+
+async def test_toggle_presence_and_request_approval_are_atomic(repo: Repo):
+    student = await repo.create_student("Иванов Иван", 2023, "2026-09-01", 1)
+    event = await repo.create_event("Лекция", "mandatory", "2026-09-02", "10:00", None, 1)
+    changed, present = await repo.toggle_presence(event.id, student.id, 1, allow_mark=False)
+    assert (changed, present) == (False, False)
+    changed, present = await repo.toggle_presence(event.id, student.id, 1, allow_mark=True)
+    assert (changed, present) == (True, True)
+    changed, present = await repo.toggle_presence(event.id, student.id, 1, allow_mark=True)
+    assert (changed, present) == (True, False)
+
+    req = await repo.create_request(student.id, event.id, "был")
+    assert req is not None
+    assert await repo.create_request(student.id, event.id, "ещё раз") is None
+    closed = await repo.list_requests(status=None, closed_only=True)
+    assert closed == []
+    approval = await repo.approve_request_with_attendance(req.id, 5)
+    assert isinstance(approval, Approval)
+    assert approval.code == "ok" and approval.marked and approval.request is not None
+    assert await repo.is_present(event.id, student.id)
+    assert (await repo.approve_request_with_attendance(req.id, 6)).code == "resolved"
+    assert [item.id for item in await repo.list_requests(status=None, closed_only=True)] == [req.id]
+    assert await repo.list_requests(status="open") == []
+
+
+async def test_failed_migration_does_not_bump_version(tmp_path):
+    config = make_config(tmp_path)
+    db = Database(config)
+    await db.connect()
+    try:
+        with pytest.raises(DatabaseError):
+            await db._apply_migration_unlocked(9, "CREATE TABLE boom(id INTEGER);\nNOT SQL;")
+        assert await db.user_version() == 0
+        async with db.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'boom'") as cur:
+            assert await cur.fetchone() is None
+    finally:
+        await db.close()
+
+
+async def test_upgrade_from_v1_collapses_duplicates(tmp_path):
+    from database.database import MIGRATIONS_DIR
+
+    config = make_config(tmp_path)
+    db = Database(config)
+    await db.connect()
+    try:
+        await db._apply_migration_unlocked(1, (MIGRATIONS_DIR / "001_initial.sql").read_text(encoding="utf-8"))
+        await db.conn.executescript(
+            """
+            INSERT INTO students (full_name, joined_on, status, role, telegram_id, created_at, updated_at) VALUES
+             ('А', '2026-09-01', 'active', 'chief_marker', 1, 't', 't'),
+             ('Б', '2026-09-01', 'active', 'chief_marker', 2, 't', 't');
+            INSERT INTO events (title, kind, event_date, created_by, created_at, updated_at) VALUES
+             ('Лекция', 'mandatory', '2026-09-02', 1, 't', 't');
+            INSERT INTO requests (student_id, event_id, text, status, created_at) VALUES
+             (1, 1, 'old', 'open', 't1'),
+             (1, 1, 'new', 'open', 't2');
+            """
+        )
+        await db.migrate()
+        assert await db.user_version() == 2
+        async with db.conn.execute("SELECT id, role FROM students ORDER BY id") as cur:
+            assert [tuple(row) for row in await cur.fetchall()] == [(1, "chief_marker"), (2, None)]
+        async with db.conn.execute("SELECT text FROM requests WHERE status = 'open'") as cur:
+            assert [row[0] for row in await cur.fetchall()] == ["new"]
+    finally:
+        await db.close()
+
+
+def test_split_sql_keeps_statements_and_drops_comments():
+    statements = split_sql("-- comment\nCREATE TABLE t(id INTEGER);\n\nINSERT INTO t VALUES (1);")
+    assert statements == ["CREATE TABLE t(id INTEGER)", "INSERT INTO t VALUES (1)"]
+
+
+async def test_set_system_raises(tmp_path):
+    db = Database(make_config(tmp_path))
+    await db.initialize()
+    try:
+        await db.set_system("probe", "1")
+        assert await db.get_system("probe") == "1"
+        await db.conn.close()
+        with pytest.raises(Exception):
+            await db.set_system("probe", "2")
+    finally:
+        db._conn = None
+        await db.close()
 
 
 async def test_callback_dedup(repo: Repo):
