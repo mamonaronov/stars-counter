@@ -54,3 +54,8 @@ class MonthSG(StatesGroup):
 
 class PickSG(StatesGroup):
     filter = State()
+
+
+class WipeSG(StatesGroup):
+    warned = State()
+    word = State()

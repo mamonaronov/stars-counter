@@ -95,6 +95,21 @@ class VpnDatabase:
         await self.conn.execute("PRAGMA wal_autocheckpoint=1000")
         await self.conn.commit()
 
+    async def wipe_samples(self) -> None:
+        """Drop ping history. The file and schema stay."""
+        await self.conn.execute("DELETE FROM vpn_latency_samples")
+        await self.conn.commit()
+        async with self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
+        ) as cur:
+            has_sequence = await cur.fetchone()
+        if has_sequence:
+            await self.conn.execute("DELETE FROM sqlite_sequence")
+            await self.conn.commit()
+        await self.vacuum()
+        await self._checkpoint()
+        logger.info("VPN samples wiped path=%s", self.path)
+
     async def vacuum(self) -> None:
         await self.conn.commit()
         await self.conn.execute("VACUUM")

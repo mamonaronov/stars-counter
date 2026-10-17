@@ -431,3 +431,58 @@ async def test_student_picker_filter(h: Harness):
     picks = {t: d for t, d in h.buttons().items() if d.startswith("pk:att:")}
     assert list(picks) == ["Антипов Пётр"]
     assert "найдено 1" in h.last_text()
+
+
+async def test_only_chief_admin_can_wipe_and_must_type_the_word(h: Harness):
+    chief = await h.repo.create_student("Главный Админ", 2023, "2026-09-01", SUPER)
+    admin = await h.repo.create_student("Обычный Админ", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(chief.id, 40)
+    await h.repo.bind_telegram(admin.id, 41)
+    await h.repo.set_role(chief.id, "chief_admin")
+    await h.repo.set_role(admin.id, "admin")
+    await h.repo.create_event("Лекция", "mandatory", "2026-09-01", "10:00", None, SUPER)
+    await h.repo.db.set_system("markers_group_id", "-100")
+    backup = await h.db.backup(prefix="before_wipe")
+    version = await h.db.user_version()
+
+    await h.text(41, "/start")
+    assert not any("Очистить все данные" in text for text in h.buttons())
+    await h.click(41, "s:wip")
+    assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
+    assert len(await h.repo.list_students()) == 2
+
+    await h.text(40, "/start")
+    assert any("Очистить все данные" in text for text in h.buttons())
+    await h.click(40, "w:2")
+    assert "первое предупреждение" in h.session.last("AnswerCallbackQuery").text
+    assert "Очистить все данные" in h.last_text()
+    assert backup.exists()
+
+    await h.press(40, "Я понимаю")
+    assert "безвозвратно" in h.last_text()
+    await h.press(40, "Отмена")
+    assert len(await h.repo.list_students()) == 2
+    assert await h.db.get_system("markers_group_id") == "-100"
+
+    await h.press(40, "Очистить все данные")
+    await h.press(40, "Я понимаю")
+    await h.press(40, "Всё равно")
+    assert "СТЕРЕТЬ" in h.last_text()
+    await h.text(40, "удалить")
+    assert "не то слово" in h.last_text()
+    assert len(await h.repo.list_students()) == 2
+
+    await h.text(40, "стереть")
+    assert any("Все данные удалены" in text for text in h.session.messages_to(40))
+    assert any("Все данные бота стёрты" in text for text in h.session.messages_to(SUPER))
+    assert await h.repo.list_students(active_only=False) == []
+    assert await h.repo.list_events() == []
+    assert await h.db.get_system("markers_group_id") is None
+    assert not backup.exists()
+    assert await h.db.user_version() == version
+    assert h.config.superadmin_id == SUPER
+    assert not any("Очистить все данные" in text for text in h.buttons())
+
+    await h.text(SUPER, "/menu")
+    assert any("Очистить все данные" in text for text in h.buttons())
+    assert "🛠 Сервис" in h.buttons()

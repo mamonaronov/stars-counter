@@ -308,3 +308,39 @@ async def test_damaged_db_restored_from_backup(tmp_path):
     finally:
         await db2.close()
     assert any(p.name.startswith("database.sqlite3.damaged.") for p in tmp_path.iterdir())
+
+
+async def test_wipe_all_data_keeps_schema_and_config(repo: Repo):
+    student = await repo.create_student("Иванов Иван", 2023, "2026-09-01", 1)
+    event = await repo.create_event("Лекция", "mandatory", "2026-09-01", "10:00", None, 1)
+    await repo.set_presence(event.id, student.id, True, 1)
+    await repo.touch_user(7, "user", "Имя", None)
+    await repo.db.set_system("markers_group_id", "-100")
+    await repo.insert_vpn_sample("2026-10-01T00:00:00+00:00", True, 12, "node", "sub", None, 1.0)
+    backup = await repo.db.backup(prefix="before_wipe")
+    version = await repo.db.user_version()
+    config_id = repo.db.config.superadmin_id
+
+    await repo.db.wipe_all_data()
+
+    assert await repo.list_students(active_only=False) == []
+    assert await repo.list_events() == []
+    assert await repo.get_user(7) is None
+    assert await repo.db.get_system("markers_group_id") is None
+    assert await repo.count_vpn_samples() == 0
+    assert not backup.exists()
+    assert repo.db.latest_backup() is None
+    assert await repo.db.user_version() == version
+    assert repo.db.config.superadmin_id == config_id
+    async with repo.db.conn.execute("PRAGMA foreign_keys") as cur:
+        fk = await cur.fetchone()
+    assert int(fk[0]) == 1
+    async with repo.db.conn.execute("PRAGMA journal_mode") as cur:
+        mode = await cur.fetchone()
+    assert str(mode[0]).lower() == "wal"
+    with pytest.raises(sqlite3.IntegrityError):
+        await repo.db.conn.execute(
+            "INSERT INTO attendance (event_id, student_id, marked_by, marked_at) VALUES (1, 1, 1, 't')"
+        )
+    again = await repo.create_student("Новый Студент", 2024, "2026-09-01", 1)
+    assert again.id == 1

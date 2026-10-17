@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import sqlite3
 from contextlib import asynccontextmanager
@@ -80,6 +81,9 @@ def split_sql(script: str) -> list[str]:
     if tail:
         statements.append(tail)
     return statements
+
+
+_TABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def install_sqlite_file(source: Path, dest: Path) -> None:
@@ -348,6 +352,58 @@ class Database:
         copy_sqlite_bundle(self.path, damaged)
         logger.critical("Damaged database copied to %s", damaged)
         return damaged
+
+    async def _user_tables_unlocked(self) -> list[str]:
+        async with self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [str(row[0]) for row in rows]
+
+    async def wipe_all_data(self) -> None:
+        """Delete every stored row and on-disk backup. Schema, user_version and config stay."""
+        async with self._lock:
+            tables = await self._user_tables_unlocked()
+            for name in tables:
+                if not _TABLE_NAME.fullmatch(name):
+                    raise DatabaseError(f"Unexpected table name {name!r}")
+            await self.conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                async with self.conn.execute("BEGIN IMMEDIATE"):
+                    pass
+                for name in tables:
+                    await self.conn.execute(f"DELETE FROM {name}")
+                async with self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
+                ) as cur:
+                    has_sequence = await cur.fetchone()
+                if has_sequence:
+                    await self.conn.execute("DELETE FROM sqlite_sequence")
+                await self.conn.commit()
+            except Exception:
+                await self._rollback()
+                logger.exception("Failed to wipe database %s", self.path)
+                raise
+            finally:
+                await self.conn.execute("PRAGMA foreign_keys=ON")
+            await self.conn.execute("VACUUM")
+            if not await self.integrity_ok():
+                raise DatabaseError("Database failed integrity_check after wipe")
+        if self.vpn_db is not None:
+            await self.vpn_db.wipe_samples()
+        self._clear_backup_files()
+        logger.warning("Runtime data wiped path=%s", self.path)
+
+    def _clear_backup_files(self) -> None:
+        if not self.backup_dir.is_dir():
+            return
+        for path in self.backup_dir.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                logger.exception("Failed to remove backup file %s", path)
 
     async def restore_from(self, backup_path: Path) -> None:
         if self._conn is not None:
