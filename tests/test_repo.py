@@ -29,6 +29,30 @@ async def test_backup_contains_data_and_rotates(repo: Repo):
         conn.close()
 
 
+async def test_student_profile_is_stored(repo: Repo):
+    created = await repo.create_student(
+        "Иванов Иван",
+        2023,
+        "2026-09-01",
+        1,
+        direction="ПИН",
+        judaica_group="рав Давид Шапиро",
+    )
+    assert created.direction == "ПИН"
+    assert created.judaica_group == "рав Давид Шапиро"
+    imported = await repo.import_students(
+        [("Петров Пётр", 2024, "ЭК", "рав Исроэль Фельдшеров")],
+        "2026-09-01",
+        1,
+    )
+    assert imported[0].direction == "ЭК"
+    assert imported[0].judaica_group == "рав Исроэль Фельдшеров"
+    cleared = await repo.update_student(created.id, direction=None, judaica_group="  ")
+    assert cleared is not None
+    assert cleared.direction is None
+    assert cleared.judaica_group is None
+
+
 async def test_student_lifecycle(repo: Repo):
     s = await repo.create_student("иванов иван", 2023, "2026-09-01", 1)
     assert s.full_name == "иванов иван"  # normalisation happens in handlers/services
@@ -222,7 +246,7 @@ async def test_upgrade_from_v1_collapses_duplicates(tmp_path):
             """
         )
         await db.migrate()
-        assert await db.user_version() == 2
+        assert await db.user_version() == db.config.required_db_version
         async with db.conn.execute("SELECT id, role FROM students ORDER BY id") as cur:
             assert [tuple(row) for row in await cur.fetchall()] == [(1, "chief_marker"), (2, None)]
         async with db.conn.execute("SELECT text FROM requests WHERE status = 'open'") as cur:

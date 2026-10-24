@@ -83,6 +83,8 @@ def attendance_fingerprint(
                     student.joined_on,
                     student.left_on or "",
                     student.status,
+                    student.direction or "",
+                    student.judaica_group or "",
                 )
             )
         )

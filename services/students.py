@@ -6,7 +6,28 @@ import re
 from dataclasses import dataclass
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_YEAR_EXACT = re.compile(r"(19|20)\d{2}")
 MAX_IMPORT_LINES = 200
+DIRECTION_LIMIT = 40
+GROUP_LIMIT = 80
+# Programs from the attendance journal. Markers can type any other value.
+DIRECTIONS = ("ПИН", "ЭК", "ЮР")
+
+
+def clean_profile_text(value: str, *, limit: int) -> str:
+    text = " ".join(value.split())
+    if not text:
+        raise ValueError("empty")
+    if len(text) > limit:
+        raise ValueError("long")
+    return text
+
+
+def match_known(value: str, known: list[str]) -> str:
+    for item in known:
+        if item.casefold() == value.casefold():
+            return item
+    return value
 
 
 def normalize_name(raw: str) -> str:
@@ -26,6 +47,39 @@ class ParsedStudent:
     full_name: str
     enrollment_year: int | None
     error: str | None = None
+    direction: str | None = None
+    judaica_group: str | None = None
+
+
+def _profile_tail(tail: str) -> tuple[int | None, str | None, str | None, str | None]:
+    """Year, direction, Judaica group and an error from the text after the name."""
+    parts = [part.strip() for part in re.split(r"[,;]", tail)]
+    while parts and not parts[-1]:
+        parts.pop()
+    if not any(parts):
+        return None, None, None, None
+    if not _YEAR_EXACT.fullmatch(parts[0]):
+        match = _YEAR_RE.search(tail)
+        filled = [part for part in parts if part]
+        if match and len(filled) == 1:
+            return int(match.group(0)), None, None, None
+        if tail.strip():
+            return None, None, None, f"не понял год: «{tail.strip()}»"
+        return None, None, None, None
+    year = int(parts[0])
+    direction = parts[1] if len(parts) > 1 and parts[1] else None
+    group = ", ".join(part for part in parts[2:] if part) or None
+    if direction is not None:
+        try:
+            direction = clean_profile_text(direction, limit=DIRECTION_LIMIT)
+        except ValueError:
+            return year, None, group, "направление слишком длинное"
+    if group is not None:
+        try:
+            group = clean_profile_text(group, limit=GROUP_LIMIT)
+        except ValueError:
+            return year, direction, None, "группа иудаики слишком длинная"
+    return year, direction, group, None
 
 
 def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
@@ -33,14 +87,14 @@ def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
     if not raw:
         return None
     year: int | None = None
+    direction: str | None = None
+    group: str | None = None
     separator = re.search(r"[,;]", raw)
     if separator:
         name_part, tail = raw[: separator.start()], raw[separator.end() :]
-        match = _YEAR_RE.search(tail)
-        if match:
-            year = int(match.group(0))
-        elif tail.strip():
-            return ParsedStudent(line_no, raw, normalize_name(name_part), None, f"не понял год: «{tail.strip()}»")
+        year, direction, group, error = _profile_tail(tail)
+        if error:
+            return ParsedStudent(line_no, raw, normalize_name(name_part), year, error, direction, group)
     else:
         name_part = raw
         match = _YEAR_RE.search(raw)
@@ -54,7 +108,7 @@ def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
         return ParsedStudent(line_no, raw, name, year, "нужны минимум фамилия и имя")
     if year is None:
         return ParsedStudent(line_no, raw, name, None, "не указан год поступления")
-    return ParsedStudent(line_no, raw, name, year)
+    return ParsedStudent(line_no, raw, name, year, None, direction, group)
 
 
 def parse_student_lines(text: str) -> list[ParsedStudent]:

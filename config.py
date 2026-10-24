@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-REQUIRED_DB_VERSION = 2
+REQUIRED_DB_VERSION = 3
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 

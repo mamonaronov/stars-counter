@@ -56,8 +56,8 @@ async def test_export_follows_attendance_and_replaces_the_previous_file(repo: Re
     prepared = await prepare_markers_export(repo, cfg)
     assert prepared.payload is not None
     book = load_workbook(BytesIO(prepared.payload.data))
-    assert len(book.sheetnames) == 4
-    assert "промежуточный" in book[book.sheetnames[2]]["A1"].value
+    assert len(book.sheetnames) == 2
+    assert "промежуточный" in book[book.sheetnames[1]]["A1"].value
 
     assert await publish_markers_export(bot, repo, cfg, silent=True) == "sent"
     assert await publish_markers_export(bot, repo, cfg, silent=True) == "unchanged"

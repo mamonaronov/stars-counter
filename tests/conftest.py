@@ -56,6 +56,8 @@ def student(
     role: str | None = None,
     telegram_id: int | None = None,
     status: str = "active",
+    direction: str | None = None,
+    judaica_group: str | None = None,
 ) -> Student:
     return Student(
         id=sid,
@@ -70,6 +72,8 @@ def student(
         created_by=1,
         created_at="2026-09-01T00:00:00+00:00",
         updated_at="2026-09-01T00:00:00+00:00",
+        direction=direction,
+        judaica_group=judaica_group,
     )
 
 

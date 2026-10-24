@@ -77,8 +77,13 @@ async def test_full_flow(h: Harness):
     await h.press(SUPER, "➕ Добавить")
     await h.text(SUPER, "козлов кирилл")
     await h.text(SUPER, "2023")
+    await h.press(SUPER, "ПИН")
+    await h.text(SUPER, "рав Давид Шапиро")
     await h.press(SUPER, "Сегодня")
     assert "Козлов Кирилл" in h.last_text()
+    kozlov = next(item for item in await h.repo.list_students() if item.full_name == "Козлов Кирилл")
+    assert kozlov.direction == "ПИН"
+    assert kozlov.judaica_group == "рав Давид Шапиро"
 
     # verification of three users
     await verify(h, "Иванов", CHIEF)

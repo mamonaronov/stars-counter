@@ -69,6 +69,13 @@ class WriteResult:
     rowcount: int
 
 
+def _blank(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    return text or None
+
+
 def _opt(factory, row: aiosqlite.Row | None):
     return factory(**dict(row)) if row else None
 
@@ -158,14 +165,19 @@ class Repo:
         enrollment_year: int | None,
         joined_on: str,
         created_by: int | None,
+        *,
+        direction: str | None = None,
+        judaica_group: str | None = None,
     ) -> Student:
         ts = to_iso(now_utc())
         new_id = await self._execute(
             """
-            INSERT INTO students (full_name, enrollment_year, joined_on, status, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, 'active', ?, ?, ?)
+            INSERT INTO students (
+                full_name, enrollment_year, direction, judaica_group, joined_on, status, created_by, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
             """,
-            (full_name.strip(), enrollment_year, joined_on, created_by, ts, ts),
+            (full_name.strip(), enrollment_year, _blank(direction), _blank(judaica_group), joined_on, created_by, ts, ts),
         )
         student = await self.get_student(new_id)
         assert student is not None
@@ -173,23 +185,38 @@ class Repo:
 
     async def import_students(
         self,
-        rows: list[tuple[str, int | None]],
+        rows: list[tuple],
         joined_on: str,
         created_by: int | None,
     ) -> list[Student]:
         """Insert the whole list in one transaction. Names that already exist are skipped."""
         created_ids: list[int] = []
         async with self.transaction():
-            for full_name, enrollment_year in rows:
+            for row in rows:
+                full_name = row[0]
+                enrollment_year = row[1]
+                direction = row[2] if len(row) > 2 else None
+                judaica_group = row[3] if len(row) > 3 else None
                 if await self._student_name_taken_unlocked(full_name):
                     continue
                 ts = to_iso(now_utc())
                 written = await self._write_unlocked(
                     """
-                    INSERT INTO students (full_name, enrollment_year, joined_on, status, created_by, created_at, updated_at)
-                    VALUES (?, ?, ?, 'active', ?, ?, ?)
+                    INSERT INTO students (
+                        full_name, enrollment_year, direction, judaica_group, joined_on, status, created_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
                     """,
-                    (full_name.strip(), enrollment_year, joined_on, created_by, ts, ts),
+                    (
+                        full_name.strip(),
+                        enrollment_year,
+                        _blank(direction),
+                        _blank(judaica_group),
+                        joined_on,
+                        created_by,
+                        ts,
+                        ts,
+                    ),
                 )
                 created_ids.append(written.last_id)
         created: list[Student] = []
@@ -249,8 +276,22 @@ class Repo:
         return None
 
     async def update_student(self, student_id: int, **fields: Any) -> Student | None:
-        allowed = {"full_name", "enrollment_year", "joined_on", "left_on", "status", "role", "telegram_id", "verified_at"}
+        allowed = {
+            "full_name",
+            "enrollment_year",
+            "direction",
+            "judaica_group",
+            "joined_on",
+            "left_on",
+            "status",
+            "role",
+            "telegram_id",
+            "verified_at",
+        }
         updates = {k: v for k, v in fields.items() if k in allowed}
+        for key in ("direction", "judaica_group"):
+            if key in updates:
+                updates[key] = _blank(updates[key])
         if not updates:
             return await self.get_student(student_id)
         updates["updated_at"] = to_iso(now_utc())

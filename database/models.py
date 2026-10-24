@@ -37,6 +37,8 @@ class Student:
     created_by: int | None
     created_at: str
     updated_at: str
+    direction: str | None = None
+    judaica_group: str | None = None
 
     @property
     def is_active(self) -> bool:

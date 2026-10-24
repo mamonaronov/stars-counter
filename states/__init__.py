@@ -25,11 +25,15 @@ class TemplateSG(StatesGroup):
 class StudentSG(StatesGroup):
     add_name = State()
     add_year = State()
+    add_direction = State()
+    add_group = State()
     add_joined = State()
     import_text = State()
     import_date = State()
     edit_name = State()
     edit_year = State()
+    edit_direction = State()
+    edit_group = State()
     edit_joined = State()
 
 

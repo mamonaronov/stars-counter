@@ -31,6 +31,19 @@ def test_parse_errors():
     assert rows[2].error and "не понял год" in rows[2].error
 
 
+def test_parse_direction_and_judaica_group():
+    rows = parse_student_lines(
+        "Иван Иванов, 2023, ПИН, рав Исроэль Фельдшеров\n"
+        "Пётр Петров, 2024, ЭК\n"
+        "Сидор Сидоров, 2022,, рав Давид Шапиро\n"
+    )
+    assert [(row.direction, row.judaica_group, row.error) for row in rows] == [
+        ("ПИН", "рав Исроэль Фельдшеров", None),
+        ("ЭК", None, None),
+        (None, "рав Давид Шапиро", None),
+    ]
+
+
 def test_parse_enrollment_year():
     assert parse_enrollment_year(" 2023 ") == 2023
     with pytest.raises(ValueError):

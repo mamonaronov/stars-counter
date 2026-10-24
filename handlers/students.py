@@ -23,7 +23,17 @@ from services.audit import audit
 from services.roles import LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor, role_title
 
 PROTECTED_STUDENT = "Нельзя менять студента с такой же или более высокой ролью."
-from services.students import MAX_IMPORT_LINES, normalize_name, parse_enrollment_year, parse_student_lines
+from services.students import (
+    DIRECTIONS,
+    DIRECTION_LIMIT,
+    GROUP_LIMIT,
+    MAX_IMPORT_LINES,
+    clean_profile_text,
+    match_known,
+    normalize_name,
+    parse_enrollment_year,
+    parse_student_lines,
+)
 from states import StudentSG
 from utils.callbacks import NAV_MAIN, SEC_STUDENTS, SEC_VERIFY
 from utils.formatting import course_text, esc, students_word
@@ -75,6 +85,8 @@ def _card_text(student: Student, config: Config, tg_display: str | None) -> str:
     lines = [
         f"👤 <b>{esc(student.full_name)}</b>",
         f"Курс: {course_text(student.enrollment_year, today.year, today.month)}",
+        f"Направление: {esc(student.direction) if student.direction else '—'}",
+        f"Группа иудаики: {esc(student.judaica_group) if student.judaica_group else '—'}",
         f"Роль: {role_title(student.role)}",
         f"Учитывается с: {student.joined_date.strftime('%d.%m.%Y')}",
     ]
@@ -102,6 +114,7 @@ async def show_student_card(target: CallbackQuery | Message, repo: Repo, config:
         if not student.is_verified:
             b.row(btn("🔗 Ссылка верификации", f"verl:{student.id}"))
         b.row(btn("✏️ Имя", f"ste:name:{student.id}"), btn("✏️ Год поступления", f"ste:year:{student.id}"))
+        b.row(btn("Направление", f"ste:direction:{student.id}"), btn("Группа иудаики", f"ste:group:{student.id}"))
         b.row(btn("📅 Учитывать с даты", f"ste:joined:{student.id}"))
         if student.is_verified:
             b.row(btn("🔓 Отвязать Telegram", f"stunl:{student.id}"))
@@ -204,17 +217,170 @@ def _joined_kb(prefix: str, today: date, back: str):
     return b.as_markup()
 
 
+def _choice_kb(prefix: str, options: list[str], *, skip_data: str, skip_label: str, back: str):
+    b = InlineKeyboardBuilder()
+    row: list = []
+    for index, option in enumerate(options):
+        button = btn(option, f"{prefix}:{index}")
+        if len(option) > 16:
+            if row:
+                b.row(*row)
+                row = []
+            b.row(button)
+            continue
+        row.append(button)
+        if len(row) == 3:
+            b.row(*row)
+            row = []
+    if row:
+        b.row(*row)
+    b.row(btn(skip_label, skip_data))
+    b.row(*nav_row(back, back_text="✖️ Отмена"))
+    return b.as_markup()
+
+
+async def _direction_options(repo: Repo) -> list[str]:
+    seen = {item.casefold() for item in DIRECTIONS}
+    extra: list[str] = []
+    for student in await repo.list_students(active_only=False):
+        value = student.direction
+        if value and value.casefold() not in seen:
+            seen.add(value.casefold())
+            extra.append(value)
+    extra.sort(key=str.casefold)
+    return [*DIRECTIONS, *extra]
+
+
+async def _group_options(repo: Repo) -> list[str]:
+    seen: set[str] = set()
+    values: list[str] = []
+    for student in await repo.list_students(active_only=False):
+        value = student.judaica_group
+        if value and value.casefold() not in seen:
+            seen.add(value.casefold())
+            values.append(value)
+    values.sort(key=str.casefold)
+    return values
+
+
+def _picked(options: list[str], token: str) -> str | None:
+    index = int(token)
+    if index < 0 or index >= len(options):
+        raise IndexError(token)
+    return options[index]
+
+
+def _typed_profile(text: str, *, limit: int, known: list[str]) -> str | None:
+    raw = text.strip()
+    if raw.casefold() in {"пропустить", "-", "—"}:
+        return None
+    return match_known(clean_profile_text(raw, limit=limit), known)
+
+
+def _profile_error(exc: ValueError, *, kind: str, limit: int) -> str:
+    if str(exc) == "long":
+        return f"{kind} должно быть короче {limit} символов."
+    return f"Напишите {kind.lower()} или нажмите кнопку."
+
+
+async def _ask_direction(target: CallbackQuery | Message, state: FSMContext, repo: Repo) -> None:
+    options = await _direction_options(repo)
+    await state.update_data(direction_options=options)
+    await state.set_state(StudentSG.add_direction)
+    name = (await state.get_data()).get("new_name") or ""
+    await respond(
+        target,
+        f"Имя: <b>{esc(name)}</b>\n\nНаправление? Выберите кнопку или напишите своё. Можно пропустить.",
+        _choice_kb("sad", options, skip_data="sad:skip", skip_label="Пропустить", back=SEC_STUDENTS),
+    )
+
+
+async def _ask_group(target: CallbackQuery | Message, state: FSMContext, repo: Repo) -> None:
+    options = await _group_options(repo)
+    await state.update_data(group_options=options)
+    await state.set_state(StudentSG.add_group)
+    await respond(
+        target,
+        "Группа иудаики? Напишите, например <i>рав Исроэль Фельдшеров</i>, или выберите уже сохранённую. Можно пропустить.",
+        _choice_kb("sag", options, skip_data="sag:skip", skip_label="Пропустить", back=SEC_STUDENTS),
+    )
+
+
+async def _ask_joined(target: CallbackQuery | Message, state: FSMContext, config: Config) -> None:
+    await state.set_state(StudentSG.add_joined)
+    today = local_today(config.timezone)
+    await respond(target, _joined_prompt(today), _joined_kb("stuj", today, SEC_STUDENTS))
+
+
 @router.message(StudentSG.add_year, F.text)
-async def add_student_year(message: Message, state: FSMContext, config: Config) -> None:
+async def add_student_year(message: Message, state: FSMContext, repo: Repo) -> None:
     try:
         year = parse_enrollment_year(message.text or "")
     except ValueError:
         await message.answer("Год должен быть четырёхзначным, например <code>2023</code>.", reply_markup=cancel_kb(SEC_STUDENTS))
         return
     await state.update_data(new_year=year)
-    await state.set_state(StudentSG.add_joined)
-    today = local_today(config.timezone)
-    await message.answer(_joined_prompt(today), reply_markup=_joined_kb("stuj", today, SEC_STUDENTS))
+    await _ask_direction(message, state, repo)
+
+
+@router.callback_query(StudentSG.add_direction, F.data.startswith("sad:"))
+async def add_direction_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+        return
+    token = cb.data.split(":", 1)[1]
+    if token == "skip":
+        value = None
+    else:
+        options = list((await state.get_data()).get("direction_options") or [])
+        try:
+            value = _picked(options, token)
+        except (IndexError, ValueError):
+            await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
+            return
+    await state.update_data(new_direction=value)
+    await _ask_group(cb, state, repo)
+
+
+@router.message(StudentSG.add_direction, F.text)
+async def add_direction_text(message: Message, state: FSMContext, repo: Repo) -> None:
+    options = list((await state.get_data()).get("direction_options") or [])
+    try:
+        value = _typed_profile(message.text or "", limit=DIRECTION_LIMIT, known=options)
+    except ValueError as exc:
+        await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
+        return
+    await state.update_data(new_direction=value)
+    await _ask_group(message, state, repo)
+
+
+@router.callback_query(StudentSG.add_group, F.data.startswith("sag:"))
+async def add_group_btn(cb: CallbackQuery, state: FSMContext, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+        return
+    token = cb.data.split(":", 1)[1]
+    if token == "skip":
+        value = None
+    else:
+        options = list((await state.get_data()).get("group_options") or [])
+        try:
+            value = _picked(options, token)
+        except (IndexError, ValueError):
+            await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
+            return
+    await state.update_data(new_group=value)
+    await _ask_joined(cb, state, config)
+
+
+@router.message(StudentSG.add_group, F.text)
+async def add_group_text(message: Message, state: FSMContext, config: Config) -> None:
+    options = list((await state.get_data()).get("group_options") or [])
+    try:
+        value = _typed_profile(message.text or "", limit=GROUP_LIMIT, known=options)
+    except ValueError as exc:
+        await message.answer(_profile_error(exc, kind="Название группы", limit=GROUP_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
+        return
+    await state.update_data(new_group=value)
+    await _ask_joined(message, state, config)
 
 
 async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, joined: date) -> None:
@@ -223,8 +389,26 @@ async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: 
         return
     data = await state.get_data()
     await state.clear()
-    student = await repo.create_student(data["new_name"], data["new_year"], joined.isoformat(), actor.telegram_id)
-    await audit(repo, actor, "student.add", entity_type="student", entity_id=student.id, студент=student.full_name, год=data["new_year"], учитывать_с=joined.strftime("%d.%m.%Y"))
+    student = await repo.create_student(
+        data["new_name"],
+        data["new_year"],
+        joined.isoformat(),
+        actor.telegram_id,
+        direction=data.get("new_direction"),
+        judaica_group=data.get("new_group"),
+    )
+    await audit(
+        repo,
+        actor,
+        "student.add",
+        entity_type="student",
+        entity_id=student.id,
+        студент=student.full_name,
+        год=data["new_year"],
+        направление=data.get("new_direction"),
+        группа_иудаики=data.get("new_group"),
+        учитывать_с=joined.strftime("%d.%m.%Y"),
+    )
     await show_student_card(target, repo, config, student.id, notice="Студент добавлен")
 
 
@@ -253,8 +437,9 @@ async def import_start(cb: CallbackQuery, state: FSMContext, actor: Actor | None
     await state.set_state(StudentSG.import_text)
     await respond(
         cb,
-        "Пришлите список: каждая строка — один студент, через запятую год поступления.\n\n"
-        "<code>Иван Иванов, 2023\nПётр Петров, 2024</code>\n\n"
+        "Пришлите список: каждая строка — один студент, через запятую год поступления. "
+        "Дальше можно указать направление и группу иудаики.\n\n"
+        "<code>Иван Иванов, 2023, ПИН, рав Исроэль Фельдшеров\nПётр Петров, 2024</code>\n\n"
         f"До {MAX_IMPORT_LINES} строк за раз. Перед добавлением покажу, что получилось.",
         cancel_kb(SEC_STUDENTS),
     )
@@ -312,8 +497,17 @@ async def import_preview(message: Message, state: FSMContext, repo: Repo, config
             lines.append(f"↩️ {esc(item.full_name)} — повтор в списке")
             continue
         seen.add(key)
-        ok.append({"name": item.full_name, "year": item.enrollment_year})
-        lines.append(f"✅ {esc(item.full_name)} — {item.enrollment_year}")
+        ok.append(
+            {
+                "name": item.full_name,
+                "year": item.enrollment_year,
+                "direction": item.direction,
+                "group": item.judaica_group,
+            }
+        )
+        extra = " · ".join(part for part in (item.direction, item.judaica_group) if part)
+        suffix = f" · {esc(extra)}" if extra else ""
+        lines.append(f"✅ {esc(item.full_name)} — {item.enrollment_year}{suffix}")
     await state.update_data(import_rows=ok, import_lines=lines, import_from=local_today(config.timezone).isoformat())
     await _render_import_preview(message, state, config)
 
@@ -344,7 +538,7 @@ async def import_confirm(cb: CallbackQuery, state: FSMContext, repo: Repo, confi
     rows = data.get("import_rows") or []
     joined = data.get("import_from") or local_today(config.timezone).isoformat()
     created_students = await repo.import_students(
-        [(row["name"], row["year"]) for row in rows],
+        [(row["name"], row["year"], row.get("direction"), row.get("group")) for row in rows],
         joined,
         actor.telegram_id,
     )
@@ -386,6 +580,31 @@ async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
     elif field == "year":
         await state.set_state(StudentSG.edit_year)
         await respond(cb, f"Текущий год поступления: <b>{student.enrollment_year or '—'}</b>\n\nНовый год?", cancel_kb(back))
+    elif field == "direction":
+        options = await _direction_options(repo)
+        await state.update_data(direction_options=options)
+        await state.set_state(StudentSG.edit_direction)
+        await respond(
+            cb,
+            f"Сейчас: <b>{esc(student.direction) if student.direction else '—'}</b>\n\nНовое направление? Можно написать своё.",
+            _choice_kb(
+                "sed",
+                options,
+                skip_data="sed:clear",
+                skip_label="Убрать",
+                back=back,
+            ),
+        )
+    elif field == "group":
+        options = await _group_options(repo)
+        await state.update_data(group_options=options)
+        await state.set_state(StudentSG.edit_group)
+        await respond(
+            cb,
+            f"Сейчас: <b>{esc(student.judaica_group) if student.judaica_group else '—'}</b>\n\n"
+            "Новая группа иудаики? Например <i>рав Исроэль Фельдшеров</i>.",
+            _choice_kb("seg", options, skip_data="seg:clear", skip_label="Убрать", back=back),
+        )
     elif field == "joined":
         await state.set_state(StudentSG.edit_joined)
         await respond(
@@ -396,18 +615,27 @@ async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
         )
 
 
-async def _apply_student_edit(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, field: str, value, label: str) -> None:
-    if not await require_level(message, actor, LEVEL_CHIEF_MARKER):
+async def _apply_student_edit(
+    target: CallbackQuery | Message,
+    state: FSMContext,
+    repo: Repo,
+    config: Config,
+    actor: Actor,
+    field: str,
+    value,
+    label: str,
+) -> None:
+    if not await require_level(target, actor, LEVEL_CHIEF_MARKER):
         await state.clear()
         return
     data = await state.get_data()
     student = await repo.get_student(int(data.get("edit_student_id") or 0))
     await state.clear()
     if student is None:
-        await message.answer("Студент не найден.")
+        await respond(target, "Студент не найден.")
         return
     if not actor.outranks(student, config.superadmin_id):
-        await message.answer(PROTECTED_STUDENT)
+        await respond(target, PROTECTED_STUDENT)
         return
     before = getattr(student, field)
     await repo.update_student(student.id, **{field: value})
@@ -445,6 +673,58 @@ async def edit_student_year(message: Message, state: FSMContext, repo: Repo, con
         await message.answer("Год должен быть четырёхзначным, например <code>2023</code>.")
         return
     await _apply_student_edit(message, state, repo, config, actor, "enrollment_year", year, "год поступления")
+
+
+@router.callback_query(StudentSG.edit_direction, F.data.startswith("sed:"))
+async def edit_direction_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    token = cb.data.split(":", 1)[1]
+    if token == "clear":
+        value = None
+    else:
+        options = list((await state.get_data()).get("direction_options") or [])
+        try:
+            value = _picked(options, token)
+        except (IndexError, ValueError):
+            await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
+            return
+    await _apply_student_edit(cb, state, repo, config, actor, "direction", value, "направление")
+
+
+@router.message(StudentSG.edit_direction, F.text)
+async def edit_direction_text(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    options = list((await state.get_data()).get("direction_options") or [])
+    try:
+        value = _typed_profile(message.text or "", limit=DIRECTION_LIMIT, known=options)
+    except ValueError as exc:
+        await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT))
+        return
+    await _apply_student_edit(message, state, repo, config, actor, "direction", value, "направление")
+
+
+@router.callback_query(StudentSG.edit_group, F.data.startswith("seg:"))
+async def edit_group_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    token = cb.data.split(":", 1)[1]
+    if token == "clear":
+        value = None
+    else:
+        options = list((await state.get_data()).get("group_options") or [])
+        try:
+            value = _picked(options, token)
+        except (IndexError, ValueError):
+            await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
+            return
+    await _apply_student_edit(cb, state, repo, config, actor, "judaica_group", value, "группа иудаики")
+
+
+@router.message(StudentSG.edit_group, F.text)
+async def edit_group_text(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    options = list((await state.get_data()).get("group_options") or [])
+    try:
+        value = _typed_profile(message.text or "", limit=GROUP_LIMIT, known=options)
+    except ValueError as exc:
+        await message.answer(_profile_error(exc, kind="Название группы", limit=GROUP_LIMIT))
+        return
+    await _apply_student_edit(message, state, repo, config, actor, "judaica_group", value, "группа иудаики")
 
 
 @router.message(StudentSG.edit_joined, F.text)
