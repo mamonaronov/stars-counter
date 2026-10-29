@@ -22,6 +22,7 @@ _TELEGRAM_BACKUP_START_DELAY = timedelta(seconds=20)
 _TELEGRAM_BACKUP_RETRY = timedelta(minutes=15)
 _VPN_MONITOR_JOB_SLACK = 5.0
 _VPN_RETENTION_EVERY = timedelta(minutes=15)
+_LOAD_SAMPLE_INTERVAL_SECONDS = 60
 
 
 def reschedule_telegram_backup(
@@ -94,6 +95,18 @@ def setup_scheduler(scheduler: AsyncIOScheduler, bot: Bot, repo: Repo, db: Datab
             coalesce=True,
             next_run_time=now_utc() + timedelta(seconds=40),
         )
+    scheduler.add_job(
+        load_sample_job,
+        "interval",
+        seconds=_LOAD_SAMPLE_INTERVAL_SECONDS,
+        id="load_sample",
+        replace_existing=True,
+        kwargs={"db": db},
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=_LOAD_SAMPLE_INTERVAL_SECONDS,
+        next_run_time=now_utc() + timedelta(seconds=15),
+    )
     scheduler.add_job(
         cleanup_job,
         "interval",
@@ -210,6 +223,23 @@ async def cleanup_job(repo: Repo) -> None:
         await repo.cleanup_callbacks(to_iso(now_utc() - timedelta(days=2)))
     except Exception:
         logger.exception("Callback cleanup failed")
+    try:
+        load_db = repo.db.load_db
+        if load_db is not None:
+            deleted = await load_db.prune_retained(repo.db.config.load_log_keep_days)
+            if deleted:
+                logger.info("Load samples pruned: %s", deleted)
+    except Exception:
+        logger.exception("Load sample prune failed")
+
+
+async def load_sample_job(db: Database) -> None:
+    try:
+        from services.load_samples import capture_server_load
+
+        await capture_server_load(db)
+    except Exception:
+        logger.exception("Load average sample failed")
 
 
 def vpn_monitor_job_timeout(monitor) -> float:

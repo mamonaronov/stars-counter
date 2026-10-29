@@ -274,6 +274,56 @@ def time_kb(prefix: str, *, default_time: str | None = None, back: str | None = 
     return b.as_markup()
 
 
+def _selected(text: str, on: bool) -> str:
+    return f"[{text}]" if on else text
+
+
+_VPN_SPAN_LABELS = {
+    "5m": "5 мин",
+    "30m": "30 мин",
+    "1h": "час",
+    "6h": "6 часов",
+    "12h": "12 часов",
+    "24h": "сутки",
+    "7d": "неделю",
+    "30d": "месяц",
+    "all": "всё время",
+}
+
+
+def admin_vpn_kb(period: str = "24h", view: str = "n", *, rounded: bool = False) -> InlineKeyboardMarkup:
+    if view not in {"n", "s", "a"}:
+        view = "n"
+    if view != "a":
+        rounded = False
+    token = "a:r" if view == "a" and rounded else view
+    b = InlineKeyboardBuilder()
+    rows = (
+        (("5m", "5 мин"), ("30m", "30 мин"), ("1h", "1 ч")),
+        (("6h", "6 ч"), ("12h", "12 ч"), ("24h", "сутки")),
+        (("7d", "неделя"), ("30d", "месяц"), ("all", "всё время")),
+    )
+    for labels in rows:
+        b.row(*[btn(_selected(label, key == period), f"adv:{key}:{token}") for key, label in labels])
+    b.row(
+        btn(_selected("Ноды", view == "n"), f"adv:{period}:n"),
+        btn(_selected("Подписки", view == "s"), f"adv:{period}:s"),
+        btn(_selected("Доступность", view == "a"), f"adv:{period}:a" + (":r" if rounded else "")),
+    )
+    span = _VPN_SPAN_LABELS.get(period, "сутки")
+    if view == "a":
+        b.row(btn(_selected("Округление", rounded), f"adv:{period}:a" + ("" if rounded else ":r")))
+    b.row(btn(f"📄 Логи за {span}", f"advl:{period}"))
+    if view == "a":
+        b.row(btn(f"📈 Доступность за {span}", f"advc:{period}:a" + (":r" if rounded else "")))
+    else:
+        chart_view = ":s" if view == "s" else ""
+        b.row(btn(f"📈 Картинки за {span}", f"advc:{period}{chart_view}"))
+    b.row(btn(f"📈 Load avg за {span}", f"adld:{period}"))
+    b.row(btn("🛠 Сервис", SEC_SERVICE))
+    return b.as_markup()
+
+
 def pager_row(prefix: str, page: int, pages: int) -> list[InlineKeyboardButton]:
     return [
         btn("«", f"{prefix}:{page - 1}") if page > 0 else btn(" ", NOOP),

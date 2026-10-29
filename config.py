@@ -91,6 +91,8 @@ class Config:
     mihomo_api_url: str = "http://127.0.0.1:19090"
     mihomo_api_secret: str | None = None
     mihomo_proxy_group: str = "AUTO"
+    load_db_path: Path | None = None
+    load_log_keep_days: int = 31
 
 
 def load_config() -> Config:
@@ -105,6 +107,7 @@ def load_config() -> Config:
     db_path = Path(os.getenv("DB_PATH", "/app/data/database.sqlite3"))
     backup_path = Path(os.getenv("BACKUP_PATH", "/app/backups"))
     vpn_db_raw = os.getenv("VPN_DB_PATH", "").strip()
+    load_db_raw = os.getenv("LOAD_DB_PATH", "").strip()
 
     return Config(
         bot_token=token,
@@ -129,4 +132,6 @@ def load_config() -> Config:
         mihomo_api_url=os.getenv("MIHOMO_API_URL", "http://127.0.0.1:19090").strip() or "http://127.0.0.1:19090",
         mihomo_api_secret=_optional("MIHOMO_API_SECRET"),
         mihomo_proxy_group=os.getenv("MIHOMO_PROXY_GROUP", "AUTO").strip() or "AUTO",
+        load_db_path=Path(load_db_raw) if load_db_raw else db_path.with_name("load.sqlite3"),
+        load_log_keep_days=max(0, _int("LOAD_LOG_KEEP_DAYS", 31)),
     )

@@ -94,6 +94,15 @@ def format_dt(dt: datetime, tz_name: str) -> str:
     return local.strftime("%d.%m.%Y %H:%M")
 
 
+def format_dt_full(dt: datetime, tz_name: str) -> str:
+    local = to_local(dt, tz_name)
+    return f"{local.day} {MONTHS_RU_GEN[local.month]} {local.year}, {local.strftime('%H:%M:%S')}"
+
+
+def format_dt_compact(dt: datetime, tz_name: str) -> str:
+    return to_local(dt, tz_name).strftime("%d.%m.%Y %H:%M:%S")
+
+
 def format_dt_iso(value: str | None, tz_name: str) -> str:
     if not value:
         return "—"

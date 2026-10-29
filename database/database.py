@@ -14,6 +14,7 @@ from pathlib import Path
 import aiosqlite
 
 from config import Config
+from database.load_database import LoadDatabase
 from database.vpn_database import VpnDatabase
 from utils.time import now_utc, to_iso
 
@@ -105,6 +106,7 @@ class Database:
         self.backup_dir = config.backup_path
         self._conn: aiosqlite.Connection | None = None
         self.vpn_db: VpnDatabase | None = None
+        self.load_db: LoadDatabase | None = None
         # One connection, many tasks. Hold this across every statement and across
         # multi-statement transactions so a rollback cannot discard another task's write.
         self._lock = asyncio.Lock()
@@ -143,6 +145,12 @@ class Database:
         await self._assert_wal()
 
     async def close(self) -> None:
+        if self.load_db is not None:
+            try:
+                await self.load_db.close()
+            except Exception:
+                logger.exception("Load database close failed")
+            self.load_db = None
         if self.vpn_db is not None:
             try:
                 await self.vpn_db.close()
@@ -437,6 +445,13 @@ class Database:
             raise DatabaseUnrecoverableError("Database failed integrity_check after migrate")
         await self._assert_wal()
         await self._init_vpn_database()
+        await self._init_load_database()
+
+    async def _init_load_database(self) -> None:
+        if self.load_db is None:
+            self.load_db = LoadDatabase(self.config)
+            await self.load_db.initialize()
+        await self.load_db.prune_retained(self.config.load_log_keep_days)
 
     async def _init_vpn_database(self) -> None:
         if self.vpn_db is None:

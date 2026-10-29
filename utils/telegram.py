@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
@@ -99,3 +101,27 @@ async def safe_send_message(bot, chat_id: int, text: str, reply_markup: InlineKe
 
 def bytes_file(data: bytes, filename: str) -> BufferedInputFile:
     return BufferedInputFile(data, filename=filename)
+
+
+def png_file(data: bytes, filename: str = "chart.png") -> BufferedInputFile:
+    return BufferedInputFile(data, filename=filename)
+
+
+def text_file(data: str, filename: str = "log.txt") -> BufferedInputFile:
+    return BufferedInputFile(data.encode("utf-8"), filename=filename)
+
+
+async def safe_send(sender: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> Any | None:
+    try:
+        return await sender(*args, **kwargs)
+    except TelegramRetryAfter as exc:
+        logger.warning("Flood wait: %s", exc.retry_after)
+        return None
+    except TelegramForbiddenError:
+        raise
+    except TelegramBadRequest:
+        logger.exception("Bad request while sending")
+        return None
+    except Exception:
+        logger.exception("Send failed")
+        return None

@@ -25,6 +25,7 @@ from aiogram.types import FSInputFile
 from config import Config
 from database.database import Database
 from utils.app_version import app_build_identity, slugify_commit_title
+from utils.formatting import seconds_human
 from utils.time import now_utc, parse_iso, to_iso, to_local
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,21 @@ def next_telegram_backup_at(
         return now
     due_at = last_sent + timedelta(minutes=interval_minutes)
     return now if now >= due_at else due_at
+
+
+def next_backup_value(
+    last_sent: datetime | None,
+    interval_minutes: int,
+    now: datetime | None = None,
+) -> str:
+    now = now or now_utc()
+    if interval_minutes <= 0:
+        return "выкл"
+    when = next_telegram_backup_at(last_sent, interval_minutes, now)
+    remaining = (when - now).total_seconds()
+    if remaining <= 0:
+        return "сейчас"
+    return f"через {seconds_human(remaining)}"
 
 
 def backup_interval_caption(interval_minutes: int) -> str:

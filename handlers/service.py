@@ -89,6 +89,7 @@ async def show_service(cb: CallbackQuery, repo: Repo, config: Config) -> None:
         await ping_status_line(repo, config),
     ]
     b = InlineKeyboardBuilder()
+    b.row(btn("🗄️ Аптайм", "ad:vpn"))
     b.row(btn("📦 Прислать бэкап сейчас", "srvb"))
     if chat_id is not None:
         b.row(btn("📤 Отправить таблицу в группу", "srvg"))

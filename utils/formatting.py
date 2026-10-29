@@ -53,6 +53,60 @@ def truncate(text: str, limit: int = 60) -> str:
     return text[: limit - 1] + "…"
 
 
+def _paren_suffix(value: str) -> tuple[str, str | None]:
+    prefix, sep, rest = value.rpartition(" (")
+    if not sep or not rest.endswith(")"):
+        return value, None
+    return prefix, rest[:-1]
+
+
+def colon_block(rows: list[tuple[str, str]]) -> str:
+    """Right-align labels so colons share one column in a monospace font.
+
+    Values that end with a parenthetical suffix keep those suffixes in a
+    second column, with the text inside the parentheses right-aligned.
+    """
+    if not rows:
+        return ""
+    label_width = max(len(label) for label, _ in rows)
+    parts = [_paren_suffix(value) for _, value in rows]
+    prefix_width = max((len(prefix) for prefix, inner in parts if inner is not None), default=0)
+    inner_width = max((len(inner) for _, inner in parts if inner is not None), default=0)
+    lines: list[str] = []
+    for (label, _), (prefix, inner) in zip(rows, parts, strict=True):
+        if inner is None:
+            value = prefix
+        else:
+            value = f"{prefix.ljust(prefix_width)} ({inner.rjust(inner_width)})"
+        lines.append(f"{label.rjust(label_width)}: {value}")
+    return "\n".join(lines)
+
+
+def pre_html(text: str) -> str:
+    return f"<pre>{html.escape(text)}</pre>"
+
+
+def seconds_human(seconds: int | float | None) -> str:
+    if seconds is None:
+        return "—"
+    total = max(0, int(round(seconds)))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes:
+        parts.append(f"{minutes} мин")
+    if secs and not days:
+        parts.append(f"{secs} с")
+    if not parts:
+        return "0 с"
+    return " ".join(parts)
+
+
 def course_text(enrollment_year: int | None, today_year: int, today_month: int) -> str:
     if not enrollment_year:
         return "—"

@@ -23,6 +23,7 @@ from middlewares import ActorMiddleware, CallbackIdempotencyMiddleware, ContextM
 from services.alerts import BOT_STARTED_TEXT, BOT_STOPPED_TEXT, format_alert, notify_alert, notify_superadmin
 from services.jobs import setup_scheduler
 from utils.logging import setup_logging
+from utils.uptime import mark_bot_started
 from utils.runtime import RuntimeControl, set_runtime
 from utils.telegram import is_stale_callback_error, is_transient_telegram_error
 from utils.telegram_session import make_telegram_session
@@ -134,6 +135,7 @@ async def run() -> None:
         raise SystemExit(1) from exc
 
     setup_logging(config.log_level)
+    mark_bot_started()
     logger.info("Starting attendance bot")
 
     try:

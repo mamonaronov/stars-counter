@@ -18,7 +18,7 @@ from database.vpn_database import sqlite_bundle_bytes
 from utils.formatting import esc
 from utils.logging import TOKEN_RE, log_extra
 from utils.telegram_session import make_telegram_session
-from utils.time import format_dt_iso, now_utc, to_iso
+from utils.time import format_dt_compact, format_dt_full, format_dt_iso, now_utc, parse_iso, to_iso
 from utils.timeouts import await_or_abandon, reset_bot_session
 from utils.uptime import host_uptime_seconds
 
@@ -55,6 +55,75 @@ def subscription_label(subscription: str | None) -> str:
     if not subscription:
         return "неизвестно"
     return SUBSCRIPTION_LABELS.get(subscription, subscription)
+
+
+def _iso_to_dt(value: str | None):
+    if not value:
+        return None
+    try:
+        return parse_iso(value)
+    except ValueError:
+        return None
+
+
+def format_vpn_log(samples: list[dict], start: str, end: str, tz_name: str = "UTC") -> str:
+    ok = sum(1 for sample in samples if sample.get("ok") in (True, 1))
+    fail = len(samples) - ok
+    start_dt = _iso_to_dt(start)
+    end_dt = _iso_to_dt(end)
+    start_human = format_dt_full(start_dt, tz_name) if start_dt else start
+    end_human = format_dt_full(end_dt, tz_name) if end_dt else end
+    rows: list[tuple[str, ...]] = []
+    for sample in samples:
+        raw = str(sample.get("measured_at") or "—")
+        measured = _iso_to_dt(raw if raw != "—" else None)
+        human = format_dt_compact(measured, tz_name) if measured else "—"
+        status = "ok" if sample.get("ok") in (True, 1) else "FAIL"
+        ms = sample.get("latency_ms")
+        ms_s = f"{ms}ms" if ms is not None else "—"
+        error = str(sample.get("error") or "—")
+        node = str(sample.get("node_name") or "—")
+        sub = str(sample.get("subscription") or "—")
+        rows.append((human, status, ms_s, error, node, sub, raw))
+    headers = ("время", "статус", "пинг", "ошибка", "нода", "подписка", "ISO")
+    widths = [len(title) for title in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    widths[0] = max(widths[0], 19)
+    right_align = {2}
+
+    def fmt(cells: tuple[str, ...]) -> str:
+        parts = []
+        for i, cell in enumerate(cells):
+            parts.append(f"{cell:>{widths[i]}}" if i in right_align else f"{cell:<{widths[i]}}")
+        return "  ".join(parts)
+
+    lines = [
+        f"VPN logs  {start_human} — {end_human}  ({tz_name})",
+        f"ISO  {start} .. {end}",
+        f"samples: {len(samples)}  ok: {ok}  fail: {fail}",
+        "",
+        fmt(headers),
+    ]
+    lines.extend(fmt(row) for row in rows)
+    return "\n".join(lines) + "\n"
+
+
+def vpn_samples_as_dicts(samples: list[VpnLatencySample]) -> list[dict]:
+    result: list[dict] = []
+    for sample in samples:
+        result.append(
+            {
+                "measured_at": sample.measured_at,
+                "ok": bool(sample.ok),
+                "latency_ms": sample.latency_ms,
+                "node_name": sample.node_name,
+                "subscription": sample.subscription,
+                "error": sample.error,
+            }
+        )
+    return result
 
 
 def sanitize_error(exc: BaseException) -> str:
