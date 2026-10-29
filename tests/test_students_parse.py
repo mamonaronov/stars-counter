@@ -24,6 +24,23 @@ def test_parse_year_without_separator():
     assert rows[0].enrollment_year == 2022
 
 
+def test_parse_short_enrollment_year():
+    rows = parse_student_lines(
+        "иван иванов, 23\n"
+        "Пётр Петров;24, ЭК\n"
+        "Сидоров Сидор Сидорович 22\n"
+        "Андрей Андреев, 25, ЮР, тфилин клуб, рав Давид Шапиро\n"
+        "Борис Борисов, 023\n"
+    )
+    assert [(row.full_name, row.enrollment_year, row.direction, row.track, row.judaica_group, row.error) for row in rows] == [
+        ("Иван Иванов", 2023, None, None, None, None),
+        ("Пётр Петров", 2024, "ЭК", None, None, None),
+        ("Сидоров Сидор Сидорович", 2022, None, None, None, None),
+        ("Андрей Андреев", 2025, "ЮР", "тфилин клуб", "рав Давид Шапиро", None),
+        ("Борис Борисов", None, None, None, None, "не понял год: «023»"),
+    ]
+
+
 def test_parse_errors():
     rows = parse_student_lines("Иван\nИван Иванов\nИван Иванов, вчера")
     assert rows[0].error == "нужны минимум фамилия и имя"

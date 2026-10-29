@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-_YEAR_EXACT = re.compile(r"(19|20)\d{2}")
+_SHORT_YEAR_AT_END = re.compile(r"(?:^|\s)(\d{2})\s*$")
 MAX_IMPORT_LINES = 200
 DIRECTION_LIMIT = 40
 GROUP_LIMIT = 80
@@ -55,6 +55,16 @@ class ParsedStudent:
     track: str | None = None
 
 
+def _enrollment_year(raw: str) -> int | None:
+    """Accept 2023 and 23. A two-digit year is the 2000s, same as the journal."""
+    text = raw.strip()
+    if re.fullmatch(r"(19|20)\d{2}", text):
+        return int(text)
+    if re.fullmatch(r"\d{2}", text):
+        return 2000 + int(text)
+    return None
+
+
 def _known_track(value: str) -> str | None:
     for item in TRACKS:
         if item.casefold() == value.casefold():
@@ -69,7 +79,8 @@ def _profile_tail(tail: str) -> tuple[int | None, str | None, str | None, str | 
         parts.pop()
     if not any(parts):
         return None, None, None, None, None
-    if not _YEAR_EXACT.fullmatch(parts[0]):
+    year = _enrollment_year(parts[0])
+    if year is None:
         match = _YEAR_RE.search(tail)
         filled = [part for part in parts if part]
         if match and len(filled) == 1:
@@ -77,7 +88,6 @@ def _profile_tail(tail: str) -> tuple[int | None, str | None, str | None, str | 
         if tail.strip():
             return None, None, None, None, f"не понял год: «{tail.strip()}»"
         return None, None, None, None, None
-    year = int(parts[0])
     direction = parts[1] if len(parts) > 1 and parts[1] else None
     rest = [part for part in parts[2:] if part]
     track = None
@@ -120,6 +130,11 @@ def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
         if match:
             year = int(match.group(0))
             name_part = (raw[: match.start()] + raw[match.end() :]).strip()
+        else:
+            short = _SHORT_YEAR_AT_END.search(raw)
+            if short:
+                year = 2000 + int(short.group(1))
+                name_part = raw[: short.start(1)].strip()
     name = normalize_name(re.sub(r"[\d,;]+", " ", name_part))
     if not name:
         return ParsedStudent(line_no, raw, "", year, "пустое имя")
