@@ -270,16 +270,27 @@ class Repo:
         *,
         direction: str | None = None,
         judaica_group: str | None = None,
+        track: str | None = None,
     ) -> Student:
         ts = to_iso(now_utc())
         new_id = await self._execute(
             """
             INSERT INTO students (
-                full_name, enrollment_year, direction, judaica_group, joined_on, status, created_by, created_at, updated_at
+                full_name, enrollment_year, direction, judaica_group, track, joined_on, status, created_by, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
             """,
-            (full_name.strip(), enrollment_year, _blank(direction), _blank(judaica_group), joined_on, created_by, ts, ts),
+            (
+                full_name.strip(),
+                enrollment_year,
+                _blank(direction),
+                _blank(judaica_group),
+                _blank(track),
+                joined_on,
+                created_by,
+                ts,
+                ts,
+            ),
         )
         student = await self.get_student(new_id)
         assert student is not None
@@ -299,21 +310,23 @@ class Repo:
                 enrollment_year = row[1]
                 direction = row[2] if len(row) > 2 else None
                 judaica_group = row[3] if len(row) > 3 else None
+                track = row[4] if len(row) > 4 else None
                 if await self._student_name_taken_unlocked(full_name):
                     continue
                 ts = to_iso(now_utc())
                 written = await self._write_unlocked(
                     """
                     INSERT INTO students (
-                        full_name, enrollment_year, direction, judaica_group, joined_on, status, created_by, created_at, updated_at
+                        full_name, enrollment_year, direction, judaica_group, track, joined_on, status, created_by, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
                     """,
                     (
                         full_name.strip(),
                         enrollment_year,
                         _blank(direction),
                         _blank(judaica_group),
+                        _blank(track),
                         joined_on,
                         created_by,
                         ts,
@@ -383,6 +396,7 @@ class Repo:
             "enrollment_year",
             "direction",
             "judaica_group",
+            "track",
             "joined_on",
             "left_on",
             "status",
@@ -391,7 +405,7 @@ class Repo:
             "verified_at",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
-        for key in ("direction", "judaica_group"):
+        for key in ("direction", "judaica_group", "track"):
             if key in updates:
                 updates[key] = _blank(updates[key])
         if not updates:

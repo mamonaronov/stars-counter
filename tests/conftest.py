@@ -58,6 +58,7 @@ def student(
     status: str = "active",
     direction: str | None = None,
     judaica_group: str | None = None,
+    track: str | None = None,
 ) -> Student:
     return Student(
         id=sid,
@@ -74,6 +75,7 @@ def student(
         updated_at="2026-09-01T00:00:00+00:00",
         direction=direction,
         judaica_group=judaica_group,
+        track=track,
     )
 
 

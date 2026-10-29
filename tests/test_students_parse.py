@@ -36,11 +36,13 @@ def test_parse_direction_and_judaica_group():
         "Иван Иванов, 2023, ПИН, рав Исроэль Фельдшеров\n"
         "Пётр Петров, 2024, ЭК\n"
         "Сидор Сидоров, 2022,, рав Давид Шапиро\n"
+        "Андрей Андреев, 2025, ЮР, тфилин клуб, рав Давид Шапиро\n"
     )
-    assert [(row.direction, row.judaica_group, row.error) for row in rows] == [
-        ("ПИН", "рав Исроэль Фельдшеров", None),
-        ("ЭК", None, None),
-        (None, "рав Давид Шапиро", None),
+    assert [(row.direction, row.track, row.judaica_group, row.error) for row in rows] == [
+        ("ПИН", None, "рав Исроэль Фельдшеров", None),
+        ("ЭК", None, None, None),
+        (None, None, "рав Давид Шапиро", None),
+        ("ЮР", "тфилин клуб", "рав Давид Шапиро", None),
     ]
 
 

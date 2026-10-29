@@ -37,9 +37,11 @@ async def test_student_profile_is_stored(repo: Repo):
         1,
         direction="ПИН",
         judaica_group="рав Давид Шапиро",
+        track="молитва",
     )
     assert created.direction == "ПИН"
     assert created.judaica_group == "рав Давид Шапиро"
+    assert created.track == "молитва"
     imported = await repo.import_students(
         [("Петров Пётр", 2024, "ЭК", "рав Исроэль Фельдшеров")],
         "2026-09-01",

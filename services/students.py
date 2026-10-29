@@ -10,8 +10,11 @@ _YEAR_EXACT = re.compile(r"(19|20)\d{2}")
 MAX_IMPORT_LINES = 200
 DIRECTION_LIMIT = 40
 GROUP_LIMIT = 80
+TRACK_LIMIT = 40
 # Programs from the attendance journal. Markers can type any other value.
 DIRECTIONS = ("ПИН", "ЭК", "ЮР")
+# Column G of the journal: prayer track. The header in the register is «Направление».
+TRACKS = ("молитва", "тфилин клуб")
 
 
 def clean_profile_text(value: str, *, limit: int) -> str:
@@ -49,37 +52,52 @@ class ParsedStudent:
     error: str | None = None
     direction: str | None = None
     judaica_group: str | None = None
+    track: str | None = None
 
 
-def _profile_tail(tail: str) -> tuple[int | None, str | None, str | None, str | None]:
-    """Year, direction, Judaica group and an error from the text after the name."""
+def _known_track(value: str) -> str | None:
+    for item in TRACKS:
+        if item.casefold() == value.casefold():
+            return item
+    return None
+
+
+def _profile_tail(tail: str) -> tuple[int | None, str | None, str | None, str | None, str | None]:
+    """Year, direction, track, Judaica group and an error from the text after the name."""
     parts = [part.strip() for part in re.split(r"[,;]", tail)]
     while parts and not parts[-1]:
         parts.pop()
     if not any(parts):
-        return None, None, None, None
+        return None, None, None, None, None
     if not _YEAR_EXACT.fullmatch(parts[0]):
         match = _YEAR_RE.search(tail)
         filled = [part for part in parts if part]
         if match and len(filled) == 1:
-            return int(match.group(0)), None, None, None
+            return int(match.group(0)), None, None, None, None
         if tail.strip():
-            return None, None, None, f"не понял год: «{tail.strip()}»"
-        return None, None, None, None
+            return None, None, None, None, f"не понял год: «{tail.strip()}»"
+        return None, None, None, None, None
     year = int(parts[0])
     direction = parts[1] if len(parts) > 1 and parts[1] else None
-    group = ", ".join(part for part in parts[2:] if part) or None
+    rest = [part for part in parts[2:] if part]
+    track = None
+    if rest:
+        known = _known_track(rest[0])
+        if known is not None:
+            track = known
+            rest = rest[1:]
+    group = ", ".join(rest) or None
     if direction is not None:
         try:
             direction = clean_profile_text(direction, limit=DIRECTION_LIMIT)
         except ValueError:
-            return year, None, group, "направление слишком длинное"
+            return year, None, track, group, "направление слишком длинное"
     if group is not None:
         try:
             group = clean_profile_text(group, limit=GROUP_LIMIT)
         except ValueError:
-            return year, direction, None, "группа иудаики слишком длинная"
-    return year, direction, group, None
+            return year, direction, track, None, "группа иудаики слишком длинная"
+    return year, direction, track, group, None
 
 
 def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
@@ -89,12 +107,13 @@ def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
     year: int | None = None
     direction: str | None = None
     group: str | None = None
+    track: str | None = None
     separator = re.search(r"[,;]", raw)
     if separator:
         name_part, tail = raw[: separator.start()], raw[separator.end() :]
-        year, direction, group, error = _profile_tail(tail)
+        year, direction, track, group, error = _profile_tail(tail)
         if error:
-            return ParsedStudent(line_no, raw, normalize_name(name_part), year, error, direction, group)
+            return ParsedStudent(line_no, raw, normalize_name(name_part), year, error, direction, group, track)
     else:
         name_part = raw
         match = _YEAR_RE.search(raw)
@@ -108,7 +127,7 @@ def parse_student_line(line_no: int, line: str) -> ParsedStudent | None:
         return ParsedStudent(line_no, raw, name, year, "нужны минимум фамилия и имя")
     if year is None:
         return ParsedStudent(line_no, raw, name, None, "не указан год поступления")
-    return ParsedStudent(line_no, raw, name, year, None, direction, group)
+    return ParsedStudent(line_no, raw, name, year, None, direction, group, track)
 
 
 def parse_student_lines(text: str) -> list[ParsedStudent]:

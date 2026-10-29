@@ -26,6 +26,7 @@ class StudentSG(StatesGroup):
     add_name = State()
     add_year = State()
     add_direction = State()
+    add_track = State()
     add_group = State()
     add_joined = State()
     import_text = State()
@@ -33,6 +34,7 @@ class StudentSG(StatesGroup):
     edit_name = State()
     edit_year = State()
     edit_direction = State()
+    edit_track = State()
     edit_group = State()
     edit_joined = State()
 

@@ -17,7 +17,7 @@ def _book(data: bytes):
 
 def test_report_journal_layout():
     students = [
-        student(1, "Антонов Антон", direction="ПИН", judaica_group="рав Исроэль Фельдшеров"),
+        student(1, "Антонов Антон", direction="ПИН", judaica_group="рав Исроэль Фельдшеров", track="молитва"),
         student(2, "Борисов Борис"),
     ]
     events = [event(1, "2026-09-01"), event(2, "2026-09-03", kind="free", title="Доп"), event(3, "2026-09-05")]
@@ -40,18 +40,22 @@ def test_report_journal_layout():
     assert ws["C3"].value == "% посещения"
     assert ws["D3"].value == "Кол-во посещения"
     assert ws["F3"].value == "Год поступления"
+    assert ws["G3"].value == "Направление"
     assert ws["H3"].value == "Группа иудаики"
     assert (ws["I1"].value, ws["J1"].value, ws["K1"].value) == ("вторник", "четверг", "суббота")
     assert (ws["I2"].value, ws["J2"].value, ws["K2"].value) == (1, 3, 5)
     assert (ws["I3"].value, ws["J3"].value, ws["K3"].value) == ("Лекция", "Доп", "Лекция")
     assert (ws["I4"].value, ws["J4"].value, ws["K4"].value) == (1, None, 1)
+    assert ws["L3"].value is None
     assert ws["L4"].value == "=SUM(I4:K4)"
-    assert ws["J3"].fill.fgColor.rgb.endswith("D9EAD3")
+    assert ws["J3"].fill.fgColor.theme == 9
 
     assert ws["B5"].value == "Антонов Антон"
     assert ws["A5"].value == 3
+    assert ws["C5"].number_format == "0%"
     assert ws["E5"].value == "ПИН"
     assert ws["F5"].value == 24
+    assert ws["G5"].value == "молитва"
     assert ws["H5"].value == "рав Исроэль Фельдшеров"
     assert ws["E6"].value is None
     assert ws["H6"].value is None
@@ -62,10 +66,18 @@ def test_report_journal_layout():
     assert ws["B6"].value == "Борисов Борис"
     assert ws["C6"].value == "=D6/$L$4"
     assert (ws["I6"].value, ws["J6"].value, ws["K6"].value) == (1, None, 1)
-    assert "мед" in ws["K6"].comment.text
-    assert ws["B7"].value == "Доля по занятию"
+    assert ws["K6"].comment is None
+    assert ws["K6"].fill.fgColor.rgb.endswith("C9DAF8")
+    assert ws["B7"].value is None
+    assert ws["G7"].value == "Освобождение по заявлению"
+    assert ws["F7"].fill.fgColor.rgb.endswith("D9EAD3")
+    assert ws["G8"].value == "Освобождение по мед причине"
+    assert ws["F8"].fill.fgColor.rgb.endswith("C9DAF8")
     assert ws["I8"].value == "=SUM(I5:I6)"
     assert ws["I7"].value == "=I8/2"
+    assert ws["I7"].number_format == "0.00%"
+    assert ws.auto_filter.ref == "A4:K8"
+    assert ws.freeze_panes is None
 
 
 def test_report_undefined_percent_is_not_zero():
@@ -157,8 +169,34 @@ def test_late_joiner_uses_own_denominator():
     ws = wb["Сентябрь 2026"]
     assert ws["C5"].value == "=D5/$K$4"
     assert (ws["I5"].value, ws["J5"].value) == (None, None)
-    assert ws["C6"].value == "=D6/1"
+    assert ws["C6"].value == "=D6/SUM($J$4:$J$4)"
+    assert ws["D6"].value == "=SUM(J6:J6)"
     assert (ws["I6"].value, ws["J6"].value) == (None, 1)
+    assert ws["I6"].fill.fgColor.rgb.endswith("00FFFF")
+
+
+def test_free_lesson_inside_a_mandatory_day_stays_plain():
+    students = [student(1, "Антонов Антон")]
+    events = [
+        event(1, "2026-09-01", title="Шахарит", time="08:00"),
+        event(2, "2026-09-01", title="Хасидут", time="10:00", kind="free"),
+    ]
+    stats = compute_group_stats(students, events, {1: {1}, 2: {1}}, [])
+    wb = _book(
+        build_report_xlsx(
+            org_title="Посещаемость групп",
+            period_title="Сентябрь 2026",
+            period_from=date(2026, 9, 1),
+            period_to=date(2026, 9, 1),
+            stats=stats,
+            events=events,
+        )
+    )
+    ws = wb["Сентябрь 2026"]
+    assert (ws["I4"].value, ws["J4"].value) == (1, None)
+    assert ws["J5"].value == 1
+    assert ws["J3"].fill.fgColor is None or ws["J3"].fill.fgColor.theme != 9
+    assert ws["I1"].fill.patternType in (None, "none")
 
 
 def test_archive_has_one_sheet_per_period():

@@ -51,6 +51,7 @@ class Student:
     updated_at: str
     direction: str | None = None
     judaica_group: str | None = None
+    track: str | None = None
 
     @property
     def is_active(self) -> bool:

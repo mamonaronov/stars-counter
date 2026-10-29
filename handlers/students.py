@@ -28,6 +28,8 @@ from services.students import (
     DIRECTION_LIMIT,
     GROUP_LIMIT,
     MAX_IMPORT_LINES,
+    TRACKS,
+    TRACK_LIMIT,
     clean_profile_text,
     match_known,
     normalize_name,
@@ -86,6 +88,7 @@ def _card_text(student: Student, config: Config, tg_display: str | None) -> str:
         f"👤 <b>{esc(student.full_name)}</b>",
         f"Курс: {course_text(student.enrollment_year, today.year, today.month)}",
         f"Направление: {esc(student.direction) if student.direction else '—'}",
+        f"Молитва / тфилин: {esc(student.track) if student.track else '—'}",
         f"Группа иудаики: {esc(student.judaica_group) if student.judaica_group else '—'}",
         f"Роль: {role_title(student.role)}",
         f"Учитывается с: {student.joined_date.strftime('%d.%m.%Y')}",
@@ -115,6 +118,7 @@ async def show_student_card(target: CallbackQuery | Message, repo: Repo, config:
             b.row(btn("🔗 Ссылка верификации", f"verl:{student.id}"))
         b.row(btn("✏️ Имя", f"ste:name:{student.id}"), btn("✏️ Год поступления", f"ste:year:{student.id}"))
         b.row(btn("Направление", f"ste:direction:{student.id}"), btn("Группа иудаики", f"ste:group:{student.id}"))
+        b.row(btn("Молитва / тфилин", f"ste:track:{student.id}"))
         b.row(btn("📅 Учитывать с даты", f"ste:joined:{student.id}"))
         if student.is_verified:
             b.row(btn("🔓 Отвязать Telegram", f"stunl:{student.id}"))
@@ -251,6 +255,18 @@ async def _direction_options(repo: Repo) -> list[str]:
     return [*DIRECTIONS, *extra]
 
 
+async def _track_options(repo: Repo) -> list[str]:
+    seen = {item.casefold() for item in TRACKS}
+    extra: list[str] = []
+    for student in await repo.list_students(active_only=False):
+        value = student.track
+        if value and value.casefold() not in seen:
+            seen.add(value.casefold())
+            extra.append(value)
+    extra.sort(key=str.casefold)
+    return [*TRACKS, *extra]
+
+
 async def _group_options(repo: Repo) -> list[str]:
     seen: set[str] = set()
     values: list[str] = []
@@ -292,6 +308,17 @@ async def _ask_direction(target: CallbackQuery | Message, state: FSMContext, rep
         target,
         f"Имя: <b>{esc(name)}</b>\n\nНаправление? Выберите кнопку или напишите своё. Можно пропустить.",
         _choice_kb("sad", options, skip_data="sad:skip", skip_label="Пропустить", back=SEC_STUDENTS),
+    )
+
+
+async def _ask_track(target: CallbackQuery | Message, state: FSMContext, repo: Repo) -> None:
+    options = await _track_options(repo)
+    await state.update_data(track_options=options)
+    await state.set_state(StudentSG.add_track)
+    await respond(
+        target,
+        "Молитва или тфилин клуб? Это колонка «Направление» рядом с годом поступления в журнале. Можно пропустить.",
+        _choice_kb("sat", options, skip_data="sat:skip", skip_label="Пропустить", back=SEC_STUDENTS),
     )
 
 
@@ -338,7 +365,7 @@ async def add_direction_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, ac
             await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
             return
     await state.update_data(new_direction=value)
-    await _ask_group(cb, state, repo)
+    await _ask_track(cb, state, repo)
 
 
 @router.message(StudentSG.add_direction, F.text)
@@ -350,6 +377,36 @@ async def add_direction_text(message: Message, state: FSMContext, repo: Repo) ->
         await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
         return
     await state.update_data(new_direction=value)
+    await _ask_track(message, state, repo)
+
+
+@router.callback_query(StudentSG.add_track, F.data.startswith("sat:"))
+async def add_track_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+        return
+    token = cb.data.split(":", 1)[1]
+    if token == "skip":
+        value = None
+    else:
+        options = list((await state.get_data()).get("track_options") or [])
+        try:
+            value = _picked(options, token)
+        except (IndexError, ValueError):
+            await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
+            return
+    await state.update_data(new_track=value)
+    await _ask_group(cb, state, repo)
+
+
+@router.message(StudentSG.add_track, F.text)
+async def add_track_text(message: Message, state: FSMContext, repo: Repo) -> None:
+    options = list((await state.get_data()).get("track_options") or [])
+    try:
+        value = _typed_profile(message.text or "", limit=TRACK_LIMIT, known=options)
+    except ValueError as exc:
+        await message.answer(_profile_error(exc, kind="Значение", limit=TRACK_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
+        return
+    await state.update_data(new_track=value)
     await _ask_group(message, state, repo)
 
 
@@ -396,6 +453,7 @@ async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: 
         actor.telegram_id,
         direction=data.get("new_direction"),
         judaica_group=data.get("new_group"),
+        track=data.get("new_track"),
     )
     await audit(
         repo,
@@ -406,6 +464,7 @@ async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: 
         студент=student.full_name,
         год=data["new_year"],
         направление=data.get("new_direction"),
+        молитва_тфилин=data.get("new_track"),
         группа_иудаики=data.get("new_group"),
         учитывать_с=joined.strftime("%d.%m.%Y"),
     )
@@ -438,8 +497,8 @@ async def import_start(cb: CallbackQuery, state: FSMContext, actor: Actor | None
     await respond(
         cb,
         "Пришлите список: каждая строка — один студент, через запятую год поступления. "
-        "Дальше можно указать направление и группу иудаики.\n\n"
-        "<code>Иван Иванов, 2023, ПИН, рав Исроэль Фельдшеров\nПётр Петров, 2024</code>\n\n"
+        "Дальше можно указать направление, затем «молитва» или «тфилин клуб», и группу иудаики.\n\n"
+        "<code>Иван Иванов, 2023, ПИН, молитва, рав Исроэль Фельдшеров\nПётр Петров, 2024</code>\n\n"
         f"До {MAX_IMPORT_LINES} строк за раз. Перед добавлением покажу, что получилось.",
         cancel_kb(SEC_STUDENTS),
     )
@@ -503,9 +562,10 @@ async def import_preview(message: Message, state: FSMContext, repo: Repo, config
                 "year": item.enrollment_year,
                 "direction": item.direction,
                 "group": item.judaica_group,
+                "track": item.track,
             }
         )
-        extra = " · ".join(part for part in (item.direction, item.judaica_group) if part)
+        extra = " · ".join(part for part in (item.direction, item.track, item.judaica_group) if part)
         suffix = f" · {esc(extra)}" if extra else ""
         lines.append(f"✅ {esc(item.full_name)} — {item.enrollment_year}{suffix}")
     await state.update_data(import_rows=ok, import_lines=lines, import_from=local_today(config.timezone).isoformat())
@@ -538,7 +598,7 @@ async def import_confirm(cb: CallbackQuery, state: FSMContext, repo: Repo, confi
     rows = data.get("import_rows") or []
     joined = data.get("import_from") or local_today(config.timezone).isoformat()
     created_students = await repo.import_students(
-        [(row["name"], row["year"], row.get("direction"), row.get("group")) for row in rows],
+        [(row["name"], row["year"], row.get("direction"), row.get("group"), row.get("track")) for row in rows],
         joined,
         actor.telegram_id,
     )
@@ -595,6 +655,16 @@ async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
                 back=back,
             ),
         )
+    elif field == "track":
+        options = await _track_options(repo)
+        await state.update_data(track_options=options)
+        await state.set_state(StudentSG.edit_track)
+        await respond(
+            cb,
+            f"Сейчас: <b>{esc(student.track) if student.track else '—'}</b>\n\n"
+            "Молитва или тфилин клуб? Можно написать своё.",
+            _choice_kb("set", options, skip_data="set:clear", skip_label="Убрать", back=back),
+        )
     elif field == "group":
         options = await _group_options(repo)
         await state.update_data(group_options=options)
@@ -640,7 +710,7 @@ async def _apply_student_edit(
     before = getattr(student, field)
     await repo.update_student(student.id, **{field: value})
     await audit(repo, actor, "student.update", entity_type="student", entity_id=student.id, студент=student.full_name, поле=label, было=before, стало=value)
-    await show_student_card(message, repo, config, student.id)
+    await show_student_card(target, repo, config, student.id)
 
 
 @router.message(StudentSG.edit_name, F.text)
@@ -699,6 +769,32 @@ async def edit_direction_text(message: Message, state: FSMContext, repo: Repo, c
         await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT))
         return
     await _apply_student_edit(message, state, repo, config, actor, "direction", value, "направление")
+
+
+@router.callback_query(StudentSG.edit_track, F.data.startswith("set:"))
+async def edit_track_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    token = cb.data.split(":", 1)[1]
+    if token == "clear":
+        value = None
+    else:
+        options = list((await state.get_data()).get("track_options") or [])
+        try:
+            value = _picked(options, token)
+        except (IndexError, ValueError):
+            await answer_callback(cb, "Список устарел, выберите ещё раз", show_alert=True)
+            return
+    await _apply_student_edit(cb, state, repo, config, actor, "track", value, "молитва / тфилин")
+
+
+@router.message(StudentSG.edit_track, F.text)
+async def edit_track_text(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    options = list((await state.get_data()).get("track_options") or [])
+    try:
+        value = _typed_profile(message.text or "", limit=TRACK_LIMIT, known=options)
+    except ValueError as exc:
+        await message.answer(_profile_error(exc, kind="Значение", limit=TRACK_LIMIT))
+        return
+    await _apply_student_edit(message, state, repo, config, actor, "track", value, "молитва / тфилин")
 
 
 @router.callback_query(StudentSG.edit_group, F.data.startswith("seg:"))

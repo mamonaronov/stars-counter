@@ -2,10 +2,11 @@
 
 The sheet follows the class register: weekday and day of the month over each
 lesson, the lesson title under them, and a weight row (1 for a mandatory
-lesson). A student row has the course, name, percent, visit count and
-enrollment year. A visit is 1. Free lessons have no weight, so a visit raises
-the percent and not the denominator. An excused miss is 1 as well; the reason
-sits in a cell comment.
+lesson). A student row has the course, name, percent, visit count, direction,
+enrollment year, prayer track and Judaica group. A visit is 1. A free lesson
+has no weight. An excused miss is also 1: green for a written leave, blue for
+a medical excuse. Lessons outside the dates a student is enrolled are cyan,
+and that student's sums cover only the lessons that count for them.
 """
 
 from __future__ import annotations
@@ -16,46 +17,53 @@ from datetime import date
 from io import BytesIO
 
 from openpyxl import Workbook
-from openpyxl.comments import Comment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles.colors import Color
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.worksheet import Worksheet
 
 from database.models import Event
-from services.stats import STATUS_EXCUSED, STATUS_PRESENT, EventRow, StudentStats
+from services.stats import STATUS_EXCUSED, STATUS_NOT_COUNTED, STATUS_PRESENT, EventRow, StudentStats
 
 _THIN = Side(style="thin", color="000000")
+_THICK = Side(style="thick", color="000000")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-_FREE_FILL = PatternFill("solid", fgColor="D9EAD3")
+_FREE_FILL = PatternFill("solid", fgColor=Color(theme=9))
+_LEAVE_FILL = PatternFill("solid", fgColor="D9EAD3")
+_SICK_FILL = PatternFill("solid", fgColor="C9DAF8")
+_OUTSIDE_FILL = PatternFill("solid", fgColor="00FFFF")
 _FONT = Font(name="Arial", size=10, color="000000")
 _FONT_BOLD = Font(name="Arial", size=10, bold=True, color="000000")
-_CENTER = Alignment(horizontal="center", vertical="center")
-_LEFT = Alignment(horizontal="left", vertical="center")
-_ROTATED = Alignment(horizontal="center", vertical="center", textRotation=90)
+_CENTER = Alignment(horizontal="center")
+_LEFT = Alignment(horizontal="left")
+_ROTATED = Alignment(horizontal="center", textRotation=90)
+_ROTATED_LEFT = Alignment(horizontal="left", textRotation=90)
+_ROTATED_PLAIN = Alignment(textRotation=90)
 
 _WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
-_EXCUSE_NOTE = {
-    "sick": "Освобождение по мед причине",
-    "leave": "Освобождение по заявлению",
+_EXCUSE_FILL = {
+    "leave": _LEAVE_FILL,
+    "sick": _SICK_FILL,
 }
-# Green from 85%, then accent, gold, pink, red. First match wins.
+# Green from 85%, then the workbook accent, gold, pink, red. First match wins.
 _PERCENT_BANDS = (
-    (0.85, "00FF00"),
-    (0.70, "4CDC8B"),
-    (0.60, "FFD966"),
-    (0.50, "EA9999"),
-    (0, "FF0000"),
+    ('"85%"', PatternFill("solid", fgColor="00FF00")),
+    ('"70%"', PatternFill("solid", fgColor=Color(theme=9))),
+    ('"60%"', PatternFill("solid", fgColor="FFD966")),
+    ('"50%"', PatternFill("solid", fgColor="EA9999")),
+    ('"0%"', PatternFill("solid", fgColor="FF0000")),
 )
 
 _IDENTITY_HEADERS = (
     (1, "Курс", _ROTATED),
     (2, "ФИО", _CENTER),
-    (3, "% посещения", _ROTATED),
+    (3, "% посещения", _ROTATED_PLAIN),
     (4, "Кол-во посещения", _ROTATED),
     (5, "Направление", _ROTATED),
-    (6, "Год поступления", _ROTATED),
+    (6, "Год поступления", _ROTATED_LEFT),
+    (7, "Направление", _CENTER),
     (8, "Группа иудаики", _CENTER),
 )
 _FIRST_EVENT_COL = 9
@@ -209,17 +217,19 @@ def _write_journal(
     _put(ws["H2"], "Число месяца", bold=True, align=_CENTER)
     for col, text, align in _IDENTITY_HEADERS:
         _put(ws.cell(row=_HEADER_ROW, column=col, value=text), text, bold=True, align=align, border=True)
-    _put(ws.cell(row=_HEADER_ROW, column=7), None, border=True)
     for col in range(1, 9):
-        _put(ws.cell(row=_WEIGHT_ROW, column=col), None, border=True)
+        _put(ws.cell(row=_WEIGHT_ROW, column=col), None, bold=True, align=_CENTER, border=True)
 
     groups = _day_groups(events)
+    day_free_by_id: dict[int, bool] = {}
     col = _FIRST_EVENT_COL
     for group in groups:
         start = col
         day_free = all(event.is_free for event in group)
+        width = 12.63 if len(group) == 1 else 6.63
         for event in group:
-            fill = _FREE_FILL if event.is_free else None
+            day_free_by_id[event.id] = day_free
+            fill = _FREE_FILL if day_free else None
             _put(
                 ws.cell(row=_HEADER_ROW, column=col),
                 event.title,
@@ -237,7 +247,7 @@ def _write_journal(
                 fill=fill,
                 border=True,
             )
-            ws.column_dimensions[get_column_letter(col)].width = 5.5
+            ws.column_dimensions[get_column_letter(col)].width = width
             col += 1
         end = col - 1
         header_fill = _FREE_FILL if day_free else None
@@ -273,13 +283,7 @@ def _write_journal(
     if weight_col is not None:
         first_letter = get_column_letter(_FIRST_EVENT_COL)
         last_letter = get_column_letter(last_event_col)
-        _put(
-            ws.cell(row=_HEADER_ROW, column=weight_col),
-            "Всего",
-            bold=True,
-            align=_ROTATED,
-            border=True,
-        )
+        _put(ws.cell(row=_HEADER_ROW, column=weight_col), None, border=True)
         _put(
             ws.cell(row=_WEIGHT_ROW, column=weight_col),
             f"=SUM({first_letter}{_WEIGHT_ROW}:{last_letter}{_WEIGHT_ROW})",
@@ -287,106 +291,113 @@ def _write_journal(
             align=_CENTER,
             border=True,
         )
-        ws.column_dimensions[get_column_letter(weight_col)].width = 6
+        ws.column_dimensions[get_column_letter(weight_col)].width = 7.88
 
     ordered = sorted(stats, key=lambda item: item.student.full_name.casefold())
     as_of = period_to or period_from
-    global_mandatory = sum(1 for event in events if event.is_mandatory)
-    first_letter = get_column_letter(_FIRST_EVENT_COL) if events else None
-    last_letter = get_column_letter(last_event_col) if events else None
 
     for offset, item in enumerate(ordered):
         row = _FIRST_STUDENT_ROW + offset
+        bounds = _counted_bounds(item.student, events)
         _put(ws.cell(row=row, column=1), _course_number(item.student.enrollment_year, as_of), align=_CENTER, border=True)
         _put(ws.cell(row=row, column=2), item.student.full_name, border=True)
-        _put(ws.cell(row=row, column=4), _count_formula(row, first_letter, last_letter), align=_CENTER, border=True)
+        _put(ws.cell(row=row, column=4), _count_formula(row, events, bounds), border=True)
         _put(
             ws.cell(row=row, column=3),
-            _percent_formula(row, item.mandatory_total, global_mandatory, weight_ref),
-            align=_CENTER,
-            fmt="0.00%",
+            _percent_formula(row, item.mandatory_total, events, bounds, weight_ref),
+            fmt="0%",
             border=True,
         )
-        _put(ws.cell(row=row, column=5), item.student.direction, align=_CENTER, border=True)
+        _put(ws.cell(row=row, column=5), item.student.direction, border=True)
         _put(
             ws.cell(row=row, column=6),
             _short_year(item.student.enrollment_year),
             align=_LEFT,
             border=True,
         )
-        _put(ws.cell(row=row, column=7), None, border=True)
-        _put(ws.cell(row=row, column=8), item.student.judaica_group, align=_LEFT, border=True)
+        _put(ws.cell(row=row, column=7), item.student.track, border=True)
+        _put(ws.cell(row=row, column=8), item.student.judaica_group, border=True)
+        if weight_col is not None:
+            _put(ws.cell(row=row, column=weight_col), None, border=True)
         by_event = {record.event.id: record for record in item.rows}
         for index, event in enumerate(events):
             column = _FIRST_EVENT_COL + index
             record = by_event.get(event.id)
-            mark = _mark(record)
             _put(
                 ws.cell(row=row, column=column),
-                mark,
+                _mark(record),
                 align=_CENTER,
-                fill=_FREE_FILL if event.is_free else None,
+                fill=_mark_fill(record, day_free=day_free_by_id.get(event.id, False)),
                 border=True,
             )
-            if record is not None and record.status == STATUS_EXCUSED:
-                note = _EXCUSE_NOTE.get(record.excuse.kind, "освобождение") if record.excuse else "освобождение"
-                ws.cell(row=row, column=column).comment = Comment(note, "Посещаемость")
 
     last_student_row = _FIRST_STUDENT_ROW + len(ordered) - 1 if ordered else _WEIGHT_ROW
+    filter_end = last_student_row
     if ordered and events:
-        _write_totals(ws, ordered, events, last_event_col, last_student_row)
+        _write_totals(ws, ordered, events, day_free_by_id, last_student_row)
+        filter_end = last_student_row + 2
 
     if ordered and any(item.percent is not None for item in ordered):
         percent_range = f"C{_FIRST_STUDENT_ROW}:C{last_student_row}"
-        for threshold, color in _PERCENT_BANDS:
+        for formula, fill in _PERCENT_BANDS:
             ws.conditional_formatting.add(
                 percent_range,
-                CellIsRule(
-                    operator="greaterThanOrEqual",
-                    formula=[str(threshold)],
-                    fill=PatternFill("solid", fgColor=color),
-                    stopIfTrue=True,
-                ),
+                CellIsRule(operator="greaterThanOrEqual", formula=[formula], fill=fill),
             )
 
     ws.row_dimensions[_HEADER_ROW].height = 120
-    ws.column_dimensions["A"].width = 5
-    ws.column_dimensions["B"].width = 29
-    ws.column_dimensions["C"].width = 8
-    ws.column_dimensions["D"].width = 5
-    ws.column_dimensions["E"].width = 10
-    ws.column_dimensions["F"].width = 5
-    ws.column_dimensions["G"].width = 11
-    ws.column_dimensions["H"].width = 28
-    ws.freeze_panes = "A5"
-    ws.auto_filter.ref = f"A{_WEIGHT_ROW}:{get_column_letter(last_event_col)}{max(last_student_row, _WEIGHT_ROW)}"
+    ws.column_dimensions["A"].width = 4.88
+    ws.column_dimensions["B"].width = 29.13
+    ws.column_dimensions["C"].width = 7.63
+    ws.column_dimensions["D"].width = 4.88
+    ws.column_dimensions["E"].width = 5.5
+    ws.column_dimensions["F"].width = 4.63
+    ws.column_dimensions["G"].width = 11.63
+    ws.column_dimensions["H"].width = 21.13
+    ws.auto_filter.ref = f"A{_WEIGHT_ROW}:{get_column_letter(last_event_col)}{filter_end}"
     ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 0
+    ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = "1:4"
-    ws.page_setup.horizontalCentered = True
-    ws.sheet_view.showGridLines = False
-    ws.sheet_view.zoomScale = 100
-    ws.page_margins.left = 0.4
-    ws.page_margins.right = 0.4
-    ws.page_margins.top = 0.4
-    ws.page_margins.bottom = 0.4
+    ws.print_options.horizontalCentered = True
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.75
+    ws.page_margins.bottom = 0.75
 
 
-def _count_formula(row: int, first_letter: str | None, last_letter: str | None) -> str | int:
-    if first_letter is None or last_letter is None:
+def _counted_bounds(student, events: list[Event]) -> tuple[int, int] | None:
+    indexes = [index for index, event in enumerate(events) if student.counts_on(event.day)]
+    if not indexes:
+        return None
+    return indexes[0], indexes[-1]
+
+
+def _count_formula(row: int, events: list[Event], bounds: tuple[int, int] | None) -> str | int:
+    if not events or bounds is None:
         return 0
-    return f"=SUM({first_letter}{row}:{last_letter}{row})"
+    start, end = bounds
+    first = get_column_letter(_FIRST_EVENT_COL + start)
+    last = get_column_letter(_FIRST_EVENT_COL + end)
+    return f"=SUM({first}{row}:{last}{row})"
 
 
-def _percent_formula(row: int, mandatory: int, global_mandatory: int, weight_ref: str | None) -> str:
-    if mandatory <= 0:
+def _percent_formula(
+    row: int,
+    mandatory: int,
+    events: list[Event],
+    bounds: tuple[int, int] | None,
+    weight_ref: str | None,
+) -> str:
+    if mandatory <= 0 or not events or bounds is None:
         return "—"
-    if weight_ref is not None and mandatory == global_mandatory:
+    start, end = bounds
+    if weight_ref is not None and start == 0 and end == len(events) - 1:
         return f"=D{row}/{weight_ref}"
-    return f"=D{row}/{mandatory}"
+    first = get_column_letter(_FIRST_EVENT_COL + start)
+    last = get_column_letter(_FIRST_EVENT_COL + end)
+    return f"=D{row}/SUM(${first}${_WEIGHT_ROW}:${last}${_WEIGHT_ROW})"
 
 
 def _mark(record: EventRow | None) -> int | None:
@@ -397,27 +408,31 @@ def _mark(record: EventRow | None) -> int | None:
     return None
 
 
+def _mark_fill(record: EventRow | None, *, day_free: bool) -> PatternFill | None:
+    if day_free:
+        return _FREE_FILL
+    if record is not None and record.status == STATUS_NOT_COUNTED:
+        return _OUTSIDE_FILL
+    if record is not None and record.status == STATUS_EXCUSED and record.excuse is not None:
+        return _EXCUSE_FILL.get(record.excuse.kind)
+    return None
+
+
 def _write_totals(
     ws: Worksheet,
     stats: list[StudentStats],
     events: list[Event],
-    last_event_col: int,
+    day_free_by_id: dict[int, bool],
     last_student_row: int,
 ) -> None:
     percent_row = last_student_row + 1
     sum_row = last_student_row + 2
     count = len(stats)
-    _put(ws.cell(row=percent_row, column=2), "Доля по занятию", bold=True, border=True)
-    _put(ws.cell(row=sum_row, column=2), "Сумма", bold=True, border=True)
-    for column in range(1, 9):
-        if column == 2:
-            continue
-        _put(ws.cell(row=percent_row, column=column), None, border=True)
-        _put(ws.cell(row=sum_row, column=column), None, border=True)
+    _write_legend(ws, percent_row, sum_row)
     for index, event in enumerate(events):
         column = _FIRST_EVENT_COL + index
         letter = get_column_letter(column)
-        fill = _FREE_FILL if event.is_free else None
+        fill = _FREE_FILL if day_free_by_id.get(event.id) else None
         _put(
             ws.cell(row=sum_row, column=column),
             f"=SUM({letter}{_FIRST_STUDENT_ROW}:{letter}{last_student_row})",
@@ -433,6 +448,26 @@ def _write_totals(
             fill=fill,
             border=True,
         )
-    for column in range(1, last_event_col + 1):
-        ws.cell(row=percent_row, column=column).border = _BORDER
-        ws.cell(row=sum_row, column=column).border = _BORDER
+
+
+def _write_legend(ws: Worksheet, percent_row: int, sum_row: int) -> None:
+    """Color key in F:H of the two summary rows, as in the class register."""
+    swatch = ws.cell(row=percent_row, column=6)
+    _put(swatch, None, bold=True, fill=_LEAVE_FILL)
+    swatch.border = Border(left=_THICK, top=_THICK)
+    label = ws.cell(row=percent_row, column=7)
+    _put(label, "Освобождение по заявлению")
+    label.border = Border(top=_THICK)
+    edge = ws.cell(row=percent_row, column=8)
+    _put(edge, None)
+    edge.border = Border(top=_THICK, right=_THICK)
+
+    swatch = ws.cell(row=sum_row, column=6)
+    _put(swatch, None, fill=_SICK_FILL)
+    swatch.border = Border(left=_THICK, bottom=_THICK)
+    label = ws.cell(row=sum_row, column=7)
+    _put(label, "Освобождение по мед причине")
+    label.border = Border(bottom=_THICK)
+    edge = ws.cell(row=sum_row, column=8)
+    _put(edge, None)
+    edge.border = Border(bottom=_THICK, right=_THICK)
