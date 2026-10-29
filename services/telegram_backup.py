@@ -24,6 +24,7 @@ from aiogram.types import FSInputFile
 
 from config import Config
 from database.database import Database
+from services.chat_migration import MIGRATIONS_KEY, resolve_chat_id, send_following_migration
 from utils.app_version import app_build_identity, slugify_commit_title
 from utils.formatting import seconds_human
 from utils.time import now_utc, parse_iso, to_iso, to_local
@@ -55,6 +56,7 @@ _VOLATILE_SYSTEM = (
     "markers_export_fingerprint",
     "markers_export_message_id",
     "markers_export_last_error",
+    MIGRATIONS_KEY,
 )
 _CONTENT_SQL = (
     "SELECT telegram_id, username, first_name, last_name, first_seen_at FROM users ORDER BY telegram_id",
@@ -199,7 +201,7 @@ async def telegram_backup_chat(db: Database) -> tuple[int | None, str | None]:
         logger.warning("Invalid %s value: %s", CHAT_ID_KEY, raw)
         return None, None
     title = await db.get_system(CHAT_TITLE_KEY)
-    return chat_id, title or None
+    return await resolve_chat_id(db, chat_id), title or None
 
 
 async def set_telegram_backup_chat(db: Database, chat_id: int, title: str | None) -> None:
@@ -383,18 +385,24 @@ async def send_telegram_backup(
         "БД + конфиги + .env"
         f"{extra}"
     )
-    try:
-        await bot.send_document(
-            dest,
+    delivered_to = dest
+
+    async def _send(chat_id: int):
+        return await bot.send_document(
+            chat_id,
             FSInputFile(path, filename=path.name),
             caption=caption,
             disable_notification=silent,
             request_timeout=120,
         )
+
+    try:
+        _, delivered_to = await send_following_migration(db, dest, _send)
     except TelegramForbiddenError:
         if stored_id is not None and stored_id == dest:
+            current, _title = await telegram_backup_chat(db)
             await clear_telegram_backup_chat(db)
-            logger.warning("Backup group %s is gone, binding cleared", dest)
+            logger.warning("Backup group %s is gone, binding cleared", current if current is not None else dest)
         logger.exception("Failed to send telegram backup %s, file kept at %s", path.name, path)
         raise
     except Exception:
@@ -404,5 +412,5 @@ async def send_telegram_backup(
     if recording:
         await db.set_system(LAST_SENT_KEY, to_iso(now_utc()))
         await db.set_system(FINGERPRINT_KEY, fingerprint)
-    logger.info("Telegram backup sent %s (%s bytes) silent=%s chat=%s", path.name, size, silent, dest)
+    logger.info("Telegram backup sent %s (%s bytes) silent=%s chat=%s", path.name, size, silent, delivered_to)
     return path

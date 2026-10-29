@@ -18,6 +18,7 @@ from config import Config
 from database.database import Database
 from database.models import Event, Excuse, Student
 from database.queries import Repo
+from services.chat_migration import resolve_chat_id, send_following_migration
 from services.periods import build_periods, students_for_period
 from services.report import PeriodSection, build_periods_xlsx
 from services.stats import compute_group_stats
@@ -54,14 +55,20 @@ class MarkersExport:
 
 
 async def markers_chat_id(db: Database, config: Config) -> int | None:
-    """Saved /bindgroup chat wins over MARKERS_GROUP_ID."""
+    """Saved /bindgroup chat wins over MARKERS_GROUP_ID.
+
+    Either value is followed when that group has been upgraded to a supergroup.
+    """
     raw = await db.get_system(KEY_GROUP)
+    chat_id: int | None = None
     if raw and raw.strip():
         try:
-            return int(raw.strip())
+            chat_id = int(raw.strip())
         except ValueError:
             logger.warning("Ignoring invalid markers_group_id in system_info: %s", raw)
-    return config.markers_group_id
+    if chat_id is None:
+        chat_id = config.markers_group_id
+    return await resolve_chat_id(db, chat_id)
 
 
 def attendance_fingerprint(
@@ -205,12 +212,16 @@ async def publish_markers_export(bot: Bot, repo: Repo, config: Config, *, silent
 
 async def _deliver(bot: Bot, db: Database, chat_id: int, payload: MarkersPayload, *, silent: bool) -> None:
     previous = await db.get_system(KEY_MESSAGE_ID)
-    message = await bot.send_document(
-        chat_id,
-        bytes_file(payload.data, payload.filename),
-        caption=payload.caption,
-        disable_notification=silent,
-    )
+
+    async def _send(target: int):
+        return await bot.send_document(
+            target,
+            bytes_file(payload.data, payload.filename),
+            caption=payload.caption,
+            disable_notification=silent,
+        )
+
+    message, chat_id = await send_following_migration(db, chat_id, _send)
     await db.set_system(KEY_MESSAGE_ID, str(message.message_id))
     await _pin(bot, chat_id, message.message_id)
     if previous and previous != str(message.message_id):

@@ -17,6 +17,7 @@ from handlers.common import require_level, respond
 from keyboards.main import btn, nav_row
 from services.alerts import notify_superadmin
 from services.audit import audit
+from services.chat_migration import adopt_if_migrated, note_group_migration
 from services.group_export import KEY_GROUP, KEY_SENT_AT, markers_chat_id, publish_markers_export
 from services.jobs import reschedule_telegram_backup
 from services.roles import LEVEL_SUPERADMIN, Actor
@@ -212,10 +213,22 @@ async def backup_chat_member_update(
             logger.exception("Failed to announce backup group bind in %s", event.chat.id)
         return
     if action == "unbind":
+        if await adopt_if_migrated(bot, repo.db, event.chat.id):
+            return
         await clear_telegram_backup_chat(repo.db)
         if actor is not None:
             await audit(repo, actor, "backup.unbind", чат=event.chat.id)
         await notify_superadmin(bot, config, backup_group_unbound_text(stored_title or event.chat.title), silent=True)
+
+
+@router.message(F.migrate_to_chat_id | F.migrate_from_chat_id)
+async def group_upgraded_to_supergroup(message: Message, repo: Repo) -> None:
+    await note_group_migration(
+        repo.db,
+        chat_id=message.chat.id,
+        migrate_to_chat_id=message.migrate_to_chat_id,
+        migrate_from_chat_id=message.migrate_from_chat_id,
+    )
 
 
 @router.message(Command("backup_here"))
