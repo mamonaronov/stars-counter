@@ -13,7 +13,7 @@ from handlers.common import render_student_picker, show_main
 from keyboards.main import back_kb
 from middlewares import build_actor
 from services.audit import audit
-from services.roles import LEVEL_CHIEF_ADMIN, LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor
+from services.roles import LEVEL_ADMIN, LEVEL_CHIEF_ADMIN, LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor
 from states import PickSG
 from utils.callbacks import NAV_CANCEL, NAV_MAIN, NOOP, SEC_HELP
 from utils.formatting import esc
@@ -117,6 +117,12 @@ def help_text(actor: Actor | None) -> str:
             "<b>Главному отмечающему и выше</b>",
             "• <b>Студенты</b> — добавить по одному или списком («Иван Иванов, 2023» в каждой строке), изменить, удалить.",
             "• <b>Роли</b> — назначить/снять роль тем, кто ниже вас; главные роли можно передать.",
+        ]
+    if level >= LEVEL_ADMIN:
+        parts += [
+            "",
+            "<b>Админу и выше</b>",
+            "• <b>Статистика бота</b> — сколько человек писали боту и сколько из них верифицированы.",
         ]
     if level >= LEVEL_CHIEF_ADMIN:
         parts += [

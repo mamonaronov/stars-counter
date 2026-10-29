@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database.models import Event, EventTemplate, Student
 from services.periods import Period, period_button_label
-from services.roles import LEVEL_CHIEF_ADMIN, LEVEL_CHIEF_MARKER, LEVEL_MARKER, LEVEL_SUPERADMIN, Actor
+from services.roles import LEVEL_ADMIN, LEVEL_CHIEF_ADMIN, LEVEL_CHIEF_MARKER, LEVEL_MARKER, LEVEL_SUPERADMIN, Actor
 from utils.callbacks import (
     NAV_CANCEL,
     NAV_MAIN,
@@ -27,6 +27,7 @@ from utils.callbacks import (
     SEC_ROLES,
     SEC_SERVICE,
     SEC_STUDENTS,
+    SEC_USAGE,
     SEC_WIPE,
     SEC_TEMPLATES,
     SEC_VERIFY,
@@ -86,6 +87,8 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
         b.row(btn("🔗 Верификация", SEC_VERIFY), btn("🕵️ Журнал действий", SEC_AUDIT))
     if level >= LEVEL_CHIEF_MARKER:
         b.row(btn("👥 Студенты", SEC_STUDENTS), btn("🎖 Роли", SEC_ROLES))
+    if level >= LEVEL_ADMIN:
+        b.row(btn("📈 Статистика бота", SEC_USAGE))
     if level >= LEVEL_SUPERADMIN:
         b.row(btn("🛠 Сервис", SEC_SERVICE))
     if level >= LEVEL_CHIEF_ADMIN:

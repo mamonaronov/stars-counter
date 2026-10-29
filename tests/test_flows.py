@@ -38,6 +38,36 @@ async def verify(h: Harness, student_name_part: str, user_id: int) -> None:
     assert "Вы подтверждены" in h.session.messages_to(user_id)[-2]
 
 
+async def test_bot_usage_is_visible_only_to_admin(h: Harness):
+    await h.repo.create_student("Гость Гостев", 2023, "2026-09-01", SUPER)
+    marker = await h.repo.create_student("Отмечающий Один", 2023, "2026-09-01", SUPER)
+    admin = await h.repo.create_student("Админ Админович", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(marker.id, MARKER)
+    await h.repo.bind_telegram(admin.id, 41)
+    await h.repo.set_role(marker.id, "marker")
+    await h.repo.set_role(admin.id, "admin")
+
+    await h.text(GUEST, "/start")
+    assert "📈 Статистика бота" not in h.buttons()
+    await h.click(GUEST, "s:use")
+    assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
+
+    await h.text(MARKER, "/start")
+    assert "📈 Статистика бота" not in h.buttons()
+    await h.click(MARKER, "s:use")
+    assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
+
+    await verify(h, "Гость", STUDENT)
+    await h.text(41, "/start")
+    assert "📈 Статистика бота" in h.buttons()
+    await h.click(41, "s:use")
+    text = h.last_text()
+    # superadmin issued the link, guest opened the bot, marker and admin opened it, student verified
+    assert "Пользовались ботом: <b>5</b>" in text
+    assert "Верифицированы: <b>3</b>" in text
+    assert "Не верифицированы: <b>2</b>" in text
+
+
 async def test_guest_sees_public_menu_only(h: Harness):
     await h.text(GUEST, "/start")
     buttons = h.buttons()

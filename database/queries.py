@@ -15,6 +15,7 @@ from database.database import Database
 from database.models import (
     Attendance,
     AuditEntry,
+    BotUsage,
     Event,
     EventTemplate,
     Excuse,
@@ -156,6 +157,27 @@ class Repo:
 
     async def get_user(self, telegram_id: int) -> User | None:
         return _opt(User, await self._fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)))
+
+    async def bot_usage(self) -> BotUsage:
+        """Accounts that wrote to the bot, and how many are linked to a student card.
+
+        A removed student still counts as verified while the Telegram account stays bound.
+        """
+        row = await self._fetchone(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users),
+                (
+                    SELECT COUNT(*) FROM users u
+                    WHERE EXISTS (
+                        SELECT 1 FROM students s WHERE s.telegram_id = u.telegram_id
+                    )
+                )
+            """
+        )
+        if row is None:
+            return BotUsage(0, 0)
+        return BotUsage(int(row[0]), int(row[1]))
 
     # --------------------------------------------------------------- students
 

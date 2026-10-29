@@ -17,6 +17,7 @@ from handlers import (
     start,
     students,
     templates,
+    usage,
     wipe,
 )
 
@@ -34,6 +35,7 @@ def setup_routers() -> Router:
     root.include_router(roles.router)
     root.include_router(audit.router)
     root.include_router(service.router)
+    root.include_router(usage.router)
     root.include_router(wipe.router)
     root.include_router(fallback.router)
     return root

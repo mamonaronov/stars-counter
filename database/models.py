@@ -24,6 +24,18 @@ class User:
 
 
 @dataclass(slots=True)
+class BotUsage:
+    """People who wrote to the bot, split by whether a student card is linked."""
+
+    total: int
+    verified: int
+
+    @property
+    def unverified(self) -> int:
+        return self.total - self.verified
+
+
+@dataclass(slots=True)
 class Student:
     id: int
     full_name: str

@@ -65,6 +65,25 @@ async def test_student_lifecycle(repo: Repo):
     assert restored.is_active and restored.left_on is None
 
 
+async def test_bot_usage_counts_people_who_wrote_and_who_are_linked(repo: Repo):
+    await repo.touch_user(1, None, "А", None)
+    await repo.touch_user(2, None, "Б", None)
+    await repo.touch_user(3, None, "В", None)
+    linked = await repo.create_student("Иванов Иван", 2023, "2026-09-01", 1)
+    removed = await repo.create_student("Петров Пётр", 2023, "2026-09-01", 1)
+    await repo.create_student("Сидоров Сидор", 2023, "2026-09-01", 1)
+    await repo.bind_telegram(linked.id, 1)
+    await repo.bind_telegram(removed.id, 2)
+    await repo.remove_student(removed.id, "2026-10-01")
+    # A student card without Telegram, and a bound account that never wrote, stay out of the total.
+    silent = await repo.create_student("Тихий Тихон", 2023, "2026-09-01", 1)
+    await repo.bind_telegram(silent.id, 4)
+    stats = await repo.bot_usage()
+    assert stats.total == 3
+    assert stats.verified == 2
+    assert stats.unverified == 1
+
+
 async def test_verification_link_is_single_use_and_revokes_previous(repo: Repo):
     s = await repo.create_student("Иванов Иван", 2023, "2026-09-01", 1)
     first = await repo.create_verification_link(s.id, 1)
