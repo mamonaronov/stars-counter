@@ -7,7 +7,7 @@ services:
         GIT_COMMIT_TITLE: ${GIT_COMMIT_TITLE:-unknown}
     image: stars-counter-bot:latest
     container_name: stars-counter-bot
-    restart: unless-stopped
+    restart: "${BOT_RESTART_POLICY:-unless-stopped}"
     env_file:
       - .env
     volumes:
