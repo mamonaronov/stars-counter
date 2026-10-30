@@ -20,7 +20,7 @@ from database.fsm_storage import SqliteStorage
 from database.queries import Repo
 from handlers import setup_routers
 from middlewares import ActorMiddleware, CallbackIdempotencyMiddleware, ContextMiddleware, ErrorIsolationMiddleware
-from services.alerts import BOT_STARTED_TEXT, BOT_STOPPED_TEXT, format_alert, notify_alert, notify_superadmin
+from services.alerts import BOT_STARTED_TEXT, BOT_STOPPED_TEXT, format_alert, notify_alert, notify_lifecycle
 from services.jobs import setup_scheduler
 from utils.logging import setup_logging
 from utils.uptime import mark_bot_started
@@ -101,7 +101,16 @@ async def _start_polling_with_retry(dp: Dispatcher, bot: Bot, stop: asyncio.Even
                 delay = min(delay * 2, _POLLING_RETRY_MAX)
 
 
-async def graceful_shutdown(bot: Bot, db: Database, scheduler: AsyncIOScheduler, config, *, notify: bool) -> None:
+async def graceful_shutdown(
+    bot: Bot,
+    db: Database,
+    scheduler: AsyncIOScheduler,
+    config,
+    repo: Repo,
+    storage,
+    *,
+    notify: bool,
+) -> None:
     logger.info("Graceful shutdown started")
     try:
         if scheduler.running:
@@ -115,7 +124,7 @@ async def graceful_shutdown(bot: Bot, db: Database, scheduler: AsyncIOScheduler,
         if notify:
             await notify_alert(bot, config, format_alert("backup", "Не удалось сделать бэкап при выключении", exc=exc))
     if notify:
-        await notify_superadmin(bot, config, BOT_STOPPED_TEXT, silent=True)
+        await notify_lifecycle(bot, repo, config, BOT_STOPPED_TEXT, storage=storage)
     try:
         await bot.session.close()
     except Exception:
@@ -194,7 +203,7 @@ async def run() -> None:
     logger.info("Waiting for Telegram API")
     if not await _wait_until_telegram_ready(bot, runtime.stop, config.telegram_proxy_url) or runtime.stop.is_set():
         set_runtime(None)
-        await graceful_shutdown(bot, db, scheduler, config, notify=False)
+        await graceful_shutdown(bot, db, scheduler, config, repo, dp.storage, notify=False)
         return
 
     try:
@@ -223,13 +232,13 @@ async def run() -> None:
             )
         except Exception:
             logger.exception("Failed to set bot commands")
-        await notify_superadmin(bot, config, BOT_STARTED_TEXT, silent=True)
+        await notify_lifecycle(bot, repo, config, BOT_STARTED_TEXT, storage=dp.storage)
 
     try:
         await _start_polling_with_retry(dp, bot, runtime.stop, proxy_url=config.telegram_proxy_url)
     finally:
         set_runtime(None)
-        await graceful_shutdown(bot, db, scheduler, config, notify=became_ready)
+        await graceful_shutdown(bot, db, scheduler, config, repo, dp.storage, notify=became_ready)
 
 
 if __name__ == "__main__":
