@@ -18,7 +18,7 @@ from handlers.common import (
     respond,
     show_student_picker,
 )
-from keyboards.main import btn, cancel_kb, confirm_kb, nav_row, pager_row
+from keyboards.main import btn, cancel_kb, confirm_kb, fit_page, nav_row, pager_row
 from services.audit import audit
 from services.roles import LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor, role_title
 
@@ -875,15 +875,11 @@ async def remove_student(cb: CallbackQuery, repo: Repo, config: Config, actor: A
     await show_students_home(cb, repo)
 
 
-REMOVED_PAGE = 10
-
-
 async def show_removed(cb: CallbackQuery, repo: Repo, page: int) -> None:
     students = [s for s in await repo.list_students(active_only=False) if not s.is_active]
-    pages = max(1, (len(students) + REMOVED_PAGE - 1) // REMOVED_PAGE)
-    page = max(0, min(page, pages - 1))
+    page, pages, size = fit_page(len(students), page, reserved=len(nav_row(SEC_STUDENTS)))
     b = InlineKeyboardBuilder()
-    for student in students[page * REMOVED_PAGE : (page + 1) * REMOVED_PAGE]:
+    for student in students[page * size : (page + 1) * size]:
         left = student.left_date.strftime("%d.%m.%Y") if student.left_date else ""
         b.row(btn(f"{student.full_name[:32]} · {left}", f"stc:{student.id}"))
     if pages > 1:

@@ -35,8 +35,25 @@ from utils.callbacks import (
 from utils.formatting import truncate
 from utils.time import MONTHS_RU_NOM, WEEKDAYS_RU, days_in_month, month_shift
 
-PICK_PAGE = 16
+# Telegram rejects the whole message when an inline keyboard has more than 100 buttons.
+MAX_INLINE_BUTTONS = 100
 LIST_PAGE = 10
+
+
+def fit_page(count: int, page: int, *, reserved: int) -> tuple[int, int, int]:
+    """How many item buttons fit before Telegram's keyboard limit.
+
+    `reserved` is the buttons that stay on every screen (navigation, footer),
+    not counting the pager. The pager is three buttons and appears only when
+    the items do not fit next to `reserved`. Returns `(page, pages, page_size)`.
+    """
+    reserved = min(reserved, MAX_INLINE_BUTTONS - 1)
+    if count + reserved <= MAX_INLINE_BUTTONS:
+        return 0, 1, max(count, 1)
+    size = max(1, MAX_INLINE_BUTTONS - reserved - 3)
+    pages = max(1, (count + size - 1) // size)
+    page = max(0, min(page, pages - 1))
+    return page, pages, size
 
 
 def btn(text: str, data: str) -> InlineKeyboardButton:
@@ -109,9 +126,10 @@ def students_picker_kb(
     extra_rows: list[list[InlineKeyboardButton]] | None = None,
 ) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    pages = max(1, (len(students) + PICK_PAGE - 1) // PICK_PAGE)
-    page = max(0, min(page, pages - 1))
-    chunk = students[page * PICK_PAGE : (page + 1) * PICK_PAGE]
+    extra = extra_rows or []
+    reserved = sum(len(row) for row in extra) + len(nav_row(back))
+    page, pages, size = fit_page(len(students), page, reserved=reserved)
+    chunk = students[page * size : (page + 1) * size]
     row: list[InlineKeyboardButton] = []
     for student in chunk:
         name = truncate(student.full_name, 22 if not student.is_active else 32)
@@ -124,11 +142,7 @@ def students_picker_kb(
     if row:
         b.row(*row)
     if pages > 1:
-        b.row(
-            btn("«", f"pkp:{ctx}:{page - 1}") if page > 0 else btn(" ", NOOP),
-            btn(f"{page + 1}/{pages}", NOOP),
-            btn("»", f"pkp:{ctx}:{page + 1}") if page < pages - 1 else btn(" ", NOOP),
-        )
+        b.row(*pager_row(f"pkp:{ctx}", page, pages))
     for extra in extra_rows or []:
         b.row(*extra)
     b.row(*nav_row(back))
@@ -147,30 +161,49 @@ def periods_kb(periods: list[Period], prefix: str, *, back: str | None = None, n
 # ------------------------------------------------------------------ events
 
 
-def marking_kb(event: Event, students: list[Student], present: set[int], *, back: str) -> InlineKeyboardMarkup:
-    """Students who already left or have not joined by the event date are marked with «·»."""
+def _marking_order(event: Event, students: list[Student]) -> list[Student]:
+    """Eligible students first, then those who do not count on the event date."""
+    return [s for s in students if s.counts_on(event.day)] + [s for s in students if not s.counts_on(event.day)]
+
+
+def marking_page_for(event: Event, students: list[Student], student_id: int) -> int:
+    """Page of the marking keyboard that contains this student."""
+    ordered = _marking_order(event, students)
+    _, pages, size = fit_page(len(ordered), 0, reserved=2)
+    if pages == 1:
+        return 0
+    for index, student in enumerate(ordered):
+        if student.id == student_id:
+            return index // size
+    return 0
+
+
+def marking_kb(event: Event, students: list[Student], present: set[int], *, back: str, page: int = 0) -> InlineKeyboardMarkup:
+    """Students who already left or have not joined by the event date are marked with «·».
+
+    The whole group is on one keyboard. A pager appears only when the buttons
+    would pass Telegram's limit.
+    """
     b = InlineKeyboardBuilder()
-    eligible = [s for s in students if s.counts_on(event.day)]
-    skipped = [s for s in students if not s.counts_on(event.day)]
-
-    def _add(group: list[Student], *, inactive: bool) -> None:
-        row: list[InlineKeyboardButton] = []
-        for student in group:
-            if student.id in present:
-                mark = "✅ "
-            elif inactive:
-                mark = "· "
-            else:
-                mark = ""
-            row.append(btn(f"{mark}{truncate(student.full_name, 30)}", f"att:{event.id}:{student.id}"))
-            if len(row) == 2:
-                b.row(*row)
-                row = []
-        if row:
+    ordered = _marking_order(event, students)
+    eligible_ids = {s.id for s in students if s.counts_on(event.day)}
+    page, pages, size = fit_page(len(ordered), page, reserved=2)
+    row: list[InlineKeyboardButton] = []
+    for student in ordered[page * size : (page + 1) * size]:
+        if student.id in present:
+            mark = "✅ "
+        elif student.id not in eligible_ids:
+            mark = "· "
+        else:
+            mark = ""
+        row.append(btn(f"{mark}{truncate(student.full_name, 30)}", f"att:{event.id}:{student.id}"))
+        if len(row) == 2:
             b.row(*row)
-
-    _add(eligible, inactive=False)
-    _add(skipped, inactive=True)
+            row = []
+    if row:
+        b.row(*row)
+    if pages > 1:
+        b.row(*pager_row(f"mkp:{event.id}", page, pages))
     b.row(btn("✔️ Готово", back), btn("🏠 Меню", NAV_MAIN))
     return b.as_markup()
 

@@ -23,6 +23,7 @@ from keyboards.main import (
     events_list_kb,
     kind_kb,
     marking_kb,
+    marking_page_for,
     nav_row,
     pager_row,
     templates_pick_kb,
@@ -89,7 +90,7 @@ async def show_event_card(target: CallbackQuery | Message, repo: Repo, config: C
         await target.answer(text, reply_markup=markup)
 
 
-async def show_marking(target: CallbackQuery | Message, repo: Repo, event: Event, *, notice: str | None = None) -> None:
+async def show_marking(target: CallbackQuery | Message, repo: Repo, event: Event, *, notice: str | None = None, page: int = 0) -> None:
     students = await repo.list_students()
     present = await repo.attendance_student_ids(event.id)
     eligible = [s for s in students if s.counts_on(event.day)]
@@ -105,7 +106,7 @@ async def show_marking(target: CallbackQuery | Message, repo: Repo, event: Event
             f"\n\nНе учитываются на эту дату: {skipped}. "
             "Кнопка с «·» — студент ещё не был в группе, отметка в процент не войдёт."
         )
-    markup = marking_kb(event, students, present, back=f"ev:{event.id}")
+    markup = marking_kb(event, students, present, back=f"ev:{event.id}", page=page)
     if isinstance(target, CallbackQuery):
         await answer_callback(target, notice)
         await safe_edit(target.message, text, markup)
@@ -314,7 +315,26 @@ async def toggle_attendance(cb: CallbackQuery, repo: Repo, actor: Actor | None) 
             студент=student.full_name,
             занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}",
         )
-    await show_marking(cb, repo, event, notice=f"{'Отмечено' if present else 'Снято'}: {short_name(student.full_name)}")
+    students = await repo.list_students()
+    await show_marking(
+        cb,
+        repo,
+        event,
+        notice=f"{'Отмечено' if present else 'Снято'}: {short_name(student.full_name)}",
+        page=marking_page_for(event, students, student.id),
+    )
+
+
+@router.callback_query(F.data.startswith("mkp:"))
+async def marking_page(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    _, raw_event, raw_page = cb.data.split(":", 2)
+    event = await repo.get_event(int(raw_event))
+    if event is None or event.deleted_at:
+        await answer_callback(cb, "Занятие не найдено", show_alert=True)
+        return
+    await show_marking(cb, repo, event, page=int(raw_page))
 
 
 # ---------------------------------------------------------------- list

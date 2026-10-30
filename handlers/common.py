@@ -154,7 +154,7 @@ async def show_student_picker(
     include_removed: bool = False,
     keep: dict | None = None,
 ) -> None:
-    """Render the paged list of students. A text message while in PickSG.filter narrows it."""
+    """Render the student list. A text message while in PickSG.filter narrows it."""
     await state.set_state(PickSG.filter)
     await state.update_data(
         pick_ctx=ctx,
