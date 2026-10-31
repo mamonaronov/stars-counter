@@ -46,6 +46,7 @@ def test_backup_is_due_once_per_interval():
 def test_default_backup_interval_is_one_hour(monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", "1:test")
     monkeypatch.setenv("SUPERADMIN_TELEGRAM_ID", "1")
+    monkeypatch.setattr("config.load_dotenv", lambda: None)
     monkeypatch.delenv("TELEGRAM_BACKUP_INTERVAL_MINUTES", raising=False)
     monkeypatch.delenv("TELEGRAM_BACKUP_INTERVAL_HOURS", raising=False)
     assert load_config().telegram_backup_interval_minutes == 60

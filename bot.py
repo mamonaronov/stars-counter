@@ -107,7 +107,6 @@ async def graceful_shutdown(
     scheduler: AsyncIOScheduler,
     config,
     repo: Repo,
-    storage,
     *,
     notify: bool,
 ) -> None:
@@ -124,7 +123,10 @@ async def graceful_shutdown(
         if notify:
             await notify_alert(bot, config, format_alert("backup", "Не удалось сделать бэкап при выключении", exc=exc))
     if notify:
-        await notify_lifecycle(bot, repo, config, BOT_STOPPED_TEXT, storage=storage)
+        try:
+            await notify_lifecycle(bot, repo, config, BOT_STOPPED_TEXT, with_menu=False)
+        except Exception:
+            logger.exception("Shutdown notice failed")
     try:
         await bot.session.close()
     except Exception:
@@ -203,7 +205,7 @@ async def run() -> None:
     logger.info("Waiting for Telegram API")
     if not await _wait_until_telegram_ready(bot, runtime.stop, config.telegram_proxy_url) or runtime.stop.is_set():
         set_runtime(None)
-        await graceful_shutdown(bot, db, scheduler, config, repo, dp.storage, notify=False)
+        await graceful_shutdown(bot, db, scheduler, config, repo, notify=False)
         return
 
     try:
@@ -232,13 +234,16 @@ async def run() -> None:
             )
         except Exception:
             logger.exception("Failed to set bot commands")
-        await notify_lifecycle(bot, repo, config, BOT_STARTED_TEXT, storage=dp.storage)
+        try:
+            await notify_lifecycle(bot, repo, config, BOT_STARTED_TEXT, storage=dp.storage)
+        except Exception:
+            logger.exception("Startup notice failed")
 
     try:
         await _start_polling_with_retry(dp, bot, runtime.stop, proxy_url=config.telegram_proxy_url)
     finally:
         set_runtime(None)
-        await graceful_shutdown(bot, db, scheduler, config, repo, dp.storage, notify=became_ready)
+        await graceful_shutdown(bot, db, scheduler, config, repo, notify=became_ready)
 
 
 if __name__ == "__main__":

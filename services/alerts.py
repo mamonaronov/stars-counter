@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import traceback
@@ -20,6 +21,9 @@ from utils.timeouts import await_or_abandon
 logger = logging.getLogger(__name__)
 
 _NOTIFY_TIMEOUT = 15.0
+# Stop notices share Docker's 30s grace with the backup, so the fan-out stays short.
+_STOP_NOTIFY_TIMEOUT = 4.0
+_STOP_NOTIFY_BUDGET = 8.0
 
 BOT_STARTED_TEXT = "✅ Бот запущен и готов к работе."
 BOT_STOPPED_TEXT = "⏹ Бот выключается."
@@ -103,8 +107,23 @@ async def notify_lifecycle(
     text: str,
     *,
     storage: BaseStorage | None = None,
+    with_menu: bool = True,
 ) -> None:
-    """Send a start or stop notice, then the same main menu as /start."""
+    """Tell admins the bot started or is stopping.
+
+    Startup sends the notice, then the same main menu as /start, and drops any
+    draft so the next message is not swallowed by an old dialog. Shutdown sends
+    only the silent line: the menu would die with the process, and the next
+    start clears drafts anyway. Those sends run together under a short budget
+    so they fit beside the backup inside Docker's stop grace.
+    """
+    if not with_menu:
+        try:
+            await asyncio.wait_for(_fanout_stop(bot, repo, config, text), timeout=_STOP_NOTIFY_BUDGET)
+        except TimeoutError:
+            logger.warning("Shutdown notice exceeded %.0fs", _STOP_NOTIFY_BUDGET)
+        return
+
     from handlers.common import menu_text
     from keyboards.main import main_menu
     from middlewares import build_actor
@@ -117,6 +136,17 @@ async def notify_lifecycle(
         actor = await build_actor(repo, config, telegram_id)
         markup = main_menu(actor, open_requests=open_requests if actor.can_mark else 0)
         await _deliver(bot, telegram_id, menu_text(actor, config), silent=False, reply_markup=markup)
+
+
+async def _fanout_stop(bot: Bot, repo: Repo, config: Config, text: str) -> None:
+    recipients = await lifecycle_recipient_ids(repo, config)
+    await asyncio.gather(
+        *(
+            _deliver(bot, telegram_id, text, silent=True, timeout=_STOP_NOTIFY_TIMEOUT)
+            for telegram_id in recipients
+        ),
+        return_exceptions=True,
+    )
 
 
 async def _clear_dialog(storage: BaseStorage | None, bot: Bot, telegram_id: int) -> None:
@@ -141,14 +171,15 @@ async def _deliver(
     *,
     silent: bool,
     reply_markup: InlineKeyboardMarkup | None = None,
+    timeout: float = _NOTIFY_TIMEOUT,
 ) -> bool:
-    kwargs: dict = {"request_timeout": int(_NOTIFY_TIMEOUT), "disable_notification": silent}
+    kwargs: dict = {"request_timeout": max(1, int(timeout)), "disable_notification": silent}
     if reply_markup is not None:
         kwargs["reply_markup"] = reply_markup
     try:
         await await_or_abandon(
             bot.send_message(chat_id, text, **kwargs),
-            _NOTIFY_TIMEOUT,
+            timeout,
             name="notify_lifecycle",
         )
         return True
