@@ -37,6 +37,18 @@ def test_uptime_report_lines(monkeypatch):
     assert "&lt;commit&gt;" in lines[0]
 
 
+def test_answered_probe_stays_a_ping_when_node_lookup_fails():
+    from services.vpn_charts import SIGNAL_NO_PING, classify_vpn_signal
+
+    assert classify_vpn_signal(ok=True, latency_ms=90, error="mihomo_unreachable:ClientConnectorError") is None
+    assert classify_vpn_signal(ok=True, latency_ms=90, error="mihomo_timeout") is None
+    assert classify_vpn_signal(ok=False, latency_ms=8000, error="timeout") == SIGNAL_NO_PING
+    assert (
+        classify_vpn_signal(ok=False, latency_ms=None, error="mihomo_unreachable:ClientConnectorError")
+        == SIGNAL_NO_PING
+    )
+
+
 def test_uptime_keyboard_matches_daily_stats_periods():
     labels = list(admin_vpn_kb("24h", "n").inline_keyboard)
     texts = [button.text for row in labels for button in row]
@@ -61,16 +73,20 @@ async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
     await repo.insert_vpn_sample(now, True, 150, "s3 | fast", "sub3", None, 110.0)
     await repo.insert_vpn_sample(now, True, 1200, "s1 | slow", "sub1", None, 120.0)
     await repo.insert_vpn_sample(now, False, 8000, "s1 | slow", "sub1", "timeout", 130.0)
+    await repo.insert_vpn_sample(
+        now, True, 80, None, None, "mihomo_unreachable:ClientConnectorError", 140.0
+    )
     start = "2000-01-01T00:00:00+00:00"
     end = "2999-01-01T00:00:00+00:00"
     summary = await repo.vpn_latency_summary(start, end)
-    assert summary["total"] == 4
+    assert summary["total"] == 5
     assert summary["fail_count"] == 1
-    assert summary["bucket_0_100"] == 1
+    assert summary["bucket_0_100"] == 2
     assert summary["bucket_100_500"] == 1
     assert summary["bucket_1000"] == 1
     assert summary["no_ping"] == 1
-    assert summary["p95_ms"] == 1200
+    assert summary["p95_ms"] == 8000
+    assert summary["p95_count"] == 1
 
     text = await _vpn_report(repo, repo.db.config, "24h", view="n")
     assert text.startswith("🛡 <b>VPN / задержка бота</b>")

@@ -110,13 +110,6 @@ _PING_BUCKET_LABELS = {
 }
 _AVAIL_SLOTS = 64
 _AVAIL_WINDOW_CAP = timedelta(hours=2)
-# Mihomo / VPN path failures — counted as no ping, not a crashed bot.
-_VPN_ISSUE_MARKERS = (
-    "mihomo_unreachable",
-    "mihomo_timeout",
-    "mihomo_http_",
-    "mihomo_no_now",
-)
 
 
 @dataclass(slots=True)
@@ -143,12 +136,10 @@ class TimelinePoint:
 
 
 def classify_vpn_signal(*, ok: bool, latency_ms: int | None, error: str | None) -> str | None:
-    err = error or ""
-    if any(marker in err for marker in _VPN_ISSUE_MARKERS):
-        return SIGNAL_NO_PING
-    if not ok or latency_ms is None:
-        return SIGNAL_NO_PING
-    return None
+    """Answered probes stay pings. `error` may be only a failed node lookup."""
+    if ok and latency_ms is not None:
+        return None
+    return SIGNAL_NO_PING
 
 
 def _is_subscription_prefix(part: str) -> bool:

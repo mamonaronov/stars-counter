@@ -31,14 +31,9 @@ from utils.time import now_utc, to_iso
 
 logger = logging.getLogger(__name__)
 
-# Keep in sync with services.vpn_charts._VPN_ISSUE_MARKERS (counted as no_ping).
-_VPN_ISSUE_SQL = (
-    "COALESCE(error, '') LIKE '%mihomo_unreachable%'"
-    " OR COALESCE(error, '') LIKE '%mihomo_timeout%'"
-    " OR COALESCE(error, '') LIKE '%mihomo_http_%'"
-    " OR COALESCE(error, '') LIKE '%mihomo_no_now%'"
-)
-_VPN_OK_PING_SQL = f"NOT ({_VPN_ISSUE_SQL}) AND ok = 1 AND latency_ms IS NOT NULL"
+# A probe that got an answer is a ping. Mihomo lookup errors share this column
+# and only mean the node name is unknown.
+_VPN_OK_PING_SQL = "ok = 1 AND latency_ms IS NOT NULL"
 _VPN_SAMPLE_COLS = "id, measured_at, ok, latency_ms, node_name, subscription, error, host_uptime_s"
 
 
@@ -1118,22 +1113,7 @@ class Repo:
         p99_count = 0
         p99_9_count = 0
         if measured > 0:
-            p95_row = await self.vpn_fetchone(
-                """
-                SELECT latency_ms FROM vpn_latency_samples
-                WHERE latency_ms IS NOT NULL
-                  AND measured_at >= ? AND measured_at < ?
-                ORDER BY latency_ms
-                LIMIT 1 OFFSET (
-                    SELECT CAST((COUNT(*) - 1) * 0.95 AS INTEGER)
-                    FROM vpn_latency_samples
-                    WHERE latency_ms IS NOT NULL
-                      AND measured_at >= ? AND measured_at < ?
-                )
-                """,
-                (start, end, start, end),
-            )
-            p95_ms = p95_row["latency_ms"] if p95_row else None
+            p95_ms = await self._vpn_latency_percentile(start, end, 0.95, measured)
             p99_ms = await self._vpn_latency_percentile(start, end, 0.99, measured)
             p99_9_ms = await self._vpn_latency_percentile(start, end, 0.999, measured)
             counts = await self.vpn_fetchone(
