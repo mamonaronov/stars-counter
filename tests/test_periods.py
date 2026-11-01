@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from services.periods import OPEN_KEY, Period, build_periods, find_period, period_button_label, period_of_event, period_range_text
+from services.periods import (
+    OPEN_KEY,
+    Period,
+    build_periods,
+    find_period,
+    period_button_label,
+    period_of_event,
+    period_range_text,
+    previous_closed_period,
+)
 from tests.conftest import TODAY, event
 
 
@@ -31,6 +40,8 @@ def test_closing_event_splits_periods():
     assert period_of_event(periods, 4) is current
     assert find_period(periods, "3") is september
     assert period_range_text(september) == "01.09.2026 — 29.09.2026"
+    assert previous_closed_period(periods) is september
+    assert previous_closed_period(build_periods([], TODAY)) is None
 
 
 def test_period_button_fits_telegram_limit():

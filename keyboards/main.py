@@ -23,6 +23,8 @@ from utils.callbacks import (
     SEC_MY,
     SEC_NEW_EVENT,
     SEC_NEW_REQUEST,
+    SEC_REPORT_PREV,
+    SEC_REPORTS,
     SEC_REQUESTS,
     SEC_ROLES,
     SEC_SERVICE,
@@ -96,12 +98,18 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
     if actor is not None and actor.is_linked:
         b.row(btn("👤 Моя посещаемость", SEC_MY), btn("✉️ Запрос отмечающему", SEC_NEW_REQUEST))
     b.row(btn("📊 Посещаемость студентов", SEC_ATTENDANCE))
+    b.row(
+        btn("📑 Отчёт за текущий месяц", SEC_REPORTS),
+        btn("📑 Отчёт за прошлый месяц", SEC_REPORT_PREV),
+    )
     if level >= LEVEL_MARKER:
         b.row(btn("➕ Новое занятие", SEC_NEW_EVENT), btn("📅 Занятия", SEC_EVENTS))
         req_label = f"📨 Запросы ({open_requests})" if open_requests else "📨 Запросы"
         b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS), btn(req_label, SEC_REQUESTS))
         b.row(btn("🩺 Больничные и отпросы", SEC_EXCUSES), btn("📋 Шаблоны", SEC_TEMPLATES))
         b.row(btn("🔗 Верификация", SEC_VERIFY), btn("🕵️ Журнал действий", SEC_AUDIT))
+    else:
+        b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS))
     if level >= LEVEL_CHIEF_MARKER:
         b.row(btn("👥 Студенты", SEC_STUDENTS), btn("🎖 Роли", SEC_ROLES))
     if level >= LEVEL_ADMIN:

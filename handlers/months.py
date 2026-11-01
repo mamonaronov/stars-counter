@@ -14,12 +14,12 @@ from database.queries import MonthBoundaryError, Repo
 from handlers.common import event_title_line, load_periods, period_header, require_level, respond
 from keyboards.main import btn, cancel_kb, confirm_kb, nav_row, periods_kb
 from services.audit import audit
-from services.periods import OPEN_KEY, Period, find_period, period_index, students_for_period
+from services.periods import OPEN_KEY, Period, find_period, period_index, previous_closed_period, students_for_period
 from services.report import build_report_xlsx
-from services.roles import Actor
+from services.roles import LEVEL_NONE, Actor
 from services.stats import StudentStats, compute_group_stats
 from states import MonthSG
-from utils.callbacks import SEC_MONTHS
+from utils.callbacks import SEC_MONTHS, SEC_REPORT_PREV, SEC_REPORTS
 from utils.formatting import esc, percent_text
 from utils.telegram import answer_callback, bytes_file
 
@@ -46,7 +46,15 @@ async def show_months(target: CallbackQuery | Message, repo: Repo, config: Confi
     await respond(target, text, periods_kb(periods, "mon"))
 
 
-async def show_month_card(target: CallbackQuery | Message, repo: Repo, config: Config, key: str, *, notice: str | None = None) -> None:
+async def show_month_card(
+    target: CallbackQuery | Message,
+    repo: Repo,
+    config: Config,
+    key: str,
+    *,
+    notice: str | None = None,
+    can_manage: bool = False,
+) -> None:
     periods = await load_periods(repo, config)
     period = find_period(periods, key)
     if period is None:
@@ -61,10 +69,10 @@ async def show_month_card(target: CallbackQuery | Message, repo: Repo, config: C
         lines.append(f"Последнее занятие: {event_title_line(period.closer)}")
     b = InlineKeyboardBuilder()
     b.row(btn("📑 Отчёт Excel", f"monx:{period.key}"), btn("📊 Сводка", f"mons:{period.key}"))
-    if period.closed:
+    if can_manage and period.closed:
         b.row(btn("🔁 Другое последнее занятие", f"monc:{period.key}"))
         b.row(btn("✏️ Переименовать", f"monr:{period.key}"), btn("❌ Открыть обратно", f"mono:{period.key}"))
-    elif period.events:
+    elif can_manage and period.events:
         b.row(btn("🔚 Закрыть месяц", f"monc:{period.key}"))
     b.row(*nav_row(SEC_MONTHS))
     await respond(target, "\n".join(lines), b.as_markup(), notice=notice)
@@ -75,7 +83,7 @@ async def show_month_card(target: CallbackQuery | Message, repo: Repo, config: C
 
 @router.callback_query(F.data == SEC_MONTHS)
 async def open_months(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor):
+    if not await require_level(cb, actor, LEVEL_NONE):
         return
     await state.clear()
     await show_months(cb, repo, config)
@@ -83,10 +91,10 @@ async def open_months(cb: CallbackQuery, state: FSMContext, repo: Repo, config: 
 
 @router.callback_query(F.data.startswith("mon:"))
 async def open_month(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor):
+    if not await require_level(cb, actor, LEVEL_NONE):
         return
     await state.clear()
-    await show_month_card(cb, repo, config, cb.data.split(":", 1)[1])
+    await show_month_card(cb, repo, config, cb.data.split(":", 1)[1], can_manage=bool(actor and actor.can_mark))
 
 
 # --------------------------------------------------------------- summary
@@ -94,7 +102,7 @@ async def open_month(cb: CallbackQuery, state: FSMContext, repo: Repo, config: C
 
 @router.callback_query(F.data.startswith("mons:"))
 async def month_summary(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor):
+    if not await require_level(cb, actor, LEVEL_NONE):
         return
     key = cb.data.split(":", 1)[1]
     periods = await load_periods(repo, config)
@@ -128,17 +136,7 @@ async def month_summary(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
 # ---------------------------------------------------------------- report
 
 
-@router.callback_query(F.data.startswith("monx:"))
-async def month_report(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor):
-        return
-    assert actor is not None
-    key = cb.data.split(":", 1)[1]
-    periods = await load_periods(repo, config)
-    period = find_period(periods, key)
-    if period is None:
-        await answer_callback(cb, "Период не найден", show_alert=True)
-        return
+async def send_period_report(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor, period: Period) -> None:
     if not period.events:
         await answer_callback(cb, "В периоде нет занятий — отчёт пуст.", show_alert=True)
         return
@@ -161,6 +159,46 @@ async def month_report(cb: CallbackQuery, repo: Repo, config: Config, actor: Act
         f"{period.start_date.strftime('%d.%m.%Y')} — {period.end_date.strftime('%d.%m.%Y')} · {len(stats)} студентов",
     )
     await audit(repo, actor, "report.export", entity_type="period", entity_id=period.closer.id if period.closer else None, период=period.title)
+
+
+@router.callback_query(F.data == SEC_REPORTS)
+async def current_month_report(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_NONE):
+        return
+    assert actor is not None
+    periods = await load_periods(repo, config)
+    period = find_period(periods, OPEN_KEY)
+    if period is None:
+        await answer_callback(cb, "Текущий месяц не найден", show_alert=True)
+        return
+    await send_period_report(cb, repo, config, actor, period)
+
+
+@router.callback_query(F.data == SEC_REPORT_PREV)
+async def previous_month_report(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_NONE):
+        return
+    assert actor is not None
+    periods = await load_periods(repo, config)
+    period = previous_closed_period(periods)
+    if period is None:
+        await answer_callback(cb, "Прошлого месяца ещё нет.", show_alert=True)
+        return
+    await send_period_report(cb, repo, config, actor, period)
+
+
+@router.callback_query(F.data.startswith("monx:"))
+async def month_report(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_NONE):
+        return
+    assert actor is not None
+    key = cb.data.split(":", 1)[1]
+    periods = await load_periods(repo, config)
+    period = find_period(periods, key)
+    if period is None:
+        await answer_callback(cb, "Период не найден", show_alert=True)
+        return
+    await send_period_report(cb, repo, config, actor, period)
 
 
 # ---------------------------------------------------- close / move closer
@@ -242,7 +280,7 @@ async def month_set_closer(cb: CallbackQuery, repo: Repo, config: Config, actor:
         месяц=period.title,
         последнее_занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}",
     )
-    await show_month_card(cb, repo, config, str(event.id), notice="Готово")
+    await show_month_card(cb, repo, config, str(event.id), notice="Готово", can_manage=True)
 
 
 # ---------------------------------------------------------------- rename
@@ -280,7 +318,7 @@ async def month_rename(message: Message, state: FSMContext, repo: Repo, config: 
     old = event.month_title
     await repo.update_event(event.id, month_title=title)
     await audit(repo, actor, "month.rename", entity_type="event", entity_id=event.id, было=old, стало=title)
-    await show_month_card(message, repo, config, key)
+    await show_month_card(message, repo, config, key, can_manage=True)
 
 
 # ---------------------------------------------------------------- reopen

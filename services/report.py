@@ -4,9 +4,11 @@ The sheet follows the class register: weekday and day of the month over each
 lesson, the lesson title under them, and a weight row (1 for a mandatory
 lesson). A student row has the course, name, percent, visit count, direction,
 enrollment year, prayer track and Judaica group. A visit is 1. A free lesson
-has no weight. An excused miss is also 1: green for a written leave, blue for
-a medical excuse. Lessons outside the dates a student is enrolled are cyan,
-and that student's sums cover only the lessons that count for them.
+has no weight. An excused miss is also 1: pale green for a written leave, pale
+blue for a medical excuse. A day of only free lessons is pale orange. Lessons
+outside the dates a student is enrolled are pale cyan, and that student's sums
+cover only the lessons that count for them. The percent column uses the same
+pastel scale and is not listed in the color key.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.styles.colors import Color
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.worksheet import Worksheet
@@ -30,10 +31,10 @@ from services.stats import STATUS_EXCUSED, STATUS_NOT_COUNTED, STATUS_PRESENT, E
 _THIN = Side(style="thin", color="000000")
 _THICK = Side(style="thick", color="000000")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-_FREE_FILL = PatternFill("solid", fgColor=Color(theme=9))
+_FREE_FILL = PatternFill("solid", fgColor="FCE5CD")
 _LEAVE_FILL = PatternFill("solid", fgColor="D9EAD3")
 _SICK_FILL = PatternFill("solid", fgColor="C9DAF8")
-_OUTSIDE_FILL = PatternFill("solid", fgColor="00FFFF")
+_OUTSIDE_FILL = PatternFill("solid", fgColor="C9EDED")
 _FONT = Font(name="Arial", size=10, color="000000")
 _FONT_BOLD = Font(name="Arial", size=10, bold=True, color="000000")
 _CENTER = Alignment(horizontal="center")
@@ -47,13 +48,29 @@ _EXCUSE_FILL = {
     "leave": _LEAVE_FILL,
     "sick": _SICK_FILL,
 }
-# Green from 85%, then the workbook accent, gold, pink, red. First match wins.
+def _cf_fill(hex_color: str) -> PatternFill:
+    """Solid fill Excel will actually paint in a conditional format.
+
+    A differential style needs the colour on both sides, with a set alpha.
+    fgColor alone is stored as transparent and the cell stays blank.
+    """
+    color = f"FF{hex_color}"
+    return PatternFill(patternType="solid", fgColor=color, bgColor=color)
+
+
+# The cell holds a fraction (1 = 100%). Pale green from 85%, then orange, yellow, pink, red.
 _PERCENT_BANDS = (
-    ('"85%"', PatternFill("solid", fgColor="00FF00")),
-    ('"70%"', PatternFill("solid", fgColor=Color(theme=9))),
-    ('"60%"', PatternFill("solid", fgColor="FFD966")),
-    ('"50%"', PatternFill("solid", fgColor="EA9999")),
-    ('"0%"', PatternFill("solid", fgColor="FF0000")),
+    ("0.85", _cf_fill("B6D7A8")),
+    ("0.7", _cf_fill("F9CB9C")),
+    ("0.6", _cf_fill("FFE599")),
+    ("0.5", _cf_fill("F4CCCC")),
+    ("0", _cf_fill("EA9999")),
+)
+_LEGEND = (
+    (_LEAVE_FILL, "Освобождение по заявлению"),
+    (_SICK_FILL, "Освобождение по мед причине"),
+    (_FREE_FILL, "Свободный день"),
+    (_OUTSIDE_FILL, "Вне срока ученика"),
 )
 
 _IDENTITY_HEADERS = (
@@ -342,7 +359,12 @@ def _write_journal(
         for formula, fill in _PERCENT_BANDS:
             ws.conditional_formatting.add(
                 percent_range,
-                CellIsRule(operator="greaterThanOrEqual", formula=[formula], fill=fill),
+                CellIsRule(
+                    operator="greaterThanOrEqual",
+                    formula=[formula],
+                    fill=fill,
+                    stopIfTrue=True,
+                ),
             )
 
     ws.row_dimensions[_HEADER_ROW].height = 120
@@ -428,7 +450,7 @@ def _write_totals(
     percent_row = last_student_row + 1
     sum_row = last_student_row + 2
     count = len(stats)
-    _write_legend(ws, percent_row, sum_row)
+    _write_legend(ws, percent_row)
     for index, event in enumerate(events):
         column = _FIRST_EVENT_COL + index
         letter = get_column_letter(column)
@@ -450,24 +472,19 @@ def _write_totals(
         )
 
 
-def _write_legend(ws: Worksheet, percent_row: int, sum_row: int) -> None:
-    """Color key in F:H of the two summary rows, as in the class register."""
-    swatch = ws.cell(row=percent_row, column=6)
-    _put(swatch, None, bold=True, fill=_LEAVE_FILL)
-    swatch.border = Border(left=_THICK, top=_THICK)
-    label = ws.cell(row=percent_row, column=7)
-    _put(label, "Освобождение по заявлению")
-    label.border = Border(top=_THICK)
-    edge = ws.cell(row=percent_row, column=8)
-    _put(edge, None)
-    edge.border = Border(top=_THICK, right=_THICK)
-
-    swatch = ws.cell(row=sum_row, column=6)
-    _put(swatch, None, fill=_SICK_FILL)
-    swatch.border = Border(left=_THICK, bottom=_THICK)
-    label = ws.cell(row=sum_row, column=7)
-    _put(label, "Освобождение по мед причине")
-    label.border = Border(bottom=_THICK)
-    edge = ws.cell(row=sum_row, column=8)
-    _put(edge, None)
-    edge.border = Border(bottom=_THICK, right=_THICK)
+def _write_legend(ws: Worksheet, start_row: int) -> None:
+    """Color key in F:H, from the summary rows downward, as in the class register."""
+    last = len(_LEGEND) - 1
+    for index, (fill, text) in enumerate(_LEGEND):
+        row = start_row + index
+        top = _THICK if index == 0 else None
+        bottom = _THICK if index == last else None
+        swatch = ws.cell(row=row, column=6)
+        _put(swatch, None, bold=index == 0, fill=fill)
+        swatch.border = Border(left=_THICK, top=top, bottom=bottom)
+        label = ws.cell(row=row, column=7)
+        _put(label, text)
+        label.border = Border(top=top, bottom=bottom)
+        edge = ws.cell(row=row, column=8)
+        _put(edge, None)
+        edge.border = Border(top=top, right=_THICK, bottom=bottom)

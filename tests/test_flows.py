@@ -72,10 +72,44 @@ async def test_guest_sees_public_menu_only(h: Harness):
     await h.text(GUEST, "/start")
     buttons = h.buttons()
     assert "📊 Посещаемость студентов" in buttons
+    assert buttons["📑 Отчёт за текущий месяц"] == "s:rep"
+    assert buttons["📑 Отчёт за прошлый месяц"] == "s:rpr"
+    assert buttons["🗓 Месяцы и отчёты"] == "s:mon"
     assert "➕ Новое занятие" not in buttons
+    assert "🩺 Больничные и отпросы" not in buttons
+    assert "🔗 Верификация" not in buttons
     assert "👤 Моя посещаемость" not in buttons
     # permission check is enforced in the handler, not just by hiding the button
     await h.click(GUEST, "s:new")
+    assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
+
+
+async def test_guest_can_download_reports_but_not_close_months(h: Harness):
+    await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
+    closed = await h.repo.create_event("Лекция", "mandatory", "2026-09-01", None, None, SUPER)
+    await h.repo.update_event(closed.id, closes_month=1, month_title="Сентябрь 2026")
+    await h.repo.create_event("Семинар", "mandatory", "2026-10-02", None, None, SUPER)
+
+    await h.text(GUEST, "/start")
+    await h.click(GUEST, "s:rep")
+    current = h.session.last("SendDocument")
+    assert current is not None and current.document.filename.startswith("Промежуточный_отчёт_")
+    assert "Промежуточный отчёт:" in current.caption
+
+    await h.click(GUEST, "s:rpr")
+    previous = h.session.last("SendDocument")
+    assert previous is not None and previous is not current
+    assert "Отчёт: Сентябрь 2026" in previous.caption
+
+    await h.click(GUEST, "s:mon")
+    await h.press(GUEST, "Текущий")
+    assert "Закрыть месяц" not in h.buttons()
+    await h.click(GUEST, "s:mon")
+    await h.press(GUEST, "Сентябрь 2026")
+    labels = h.buttons()
+    assert "📑 Отчёт Excel" in labels and "📊 Сводка" in labels
+    assert "Открыть обратно" not in labels and "Переименовать" not in labels
+    await h.click(GUEST, f"monc:{closed.id}")
     assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
 
 
@@ -150,6 +184,8 @@ async def test_full_flow(h: Harness):
     # marker cannot change the chief's role
     await h.text(MARKER, "/menu")
     assert "🎖 Роли" not in h.buttons()
+    assert "🩺 Больничные и отпросы" in h.buttons()
+    assert "🔗 Верификация" in h.buttons()
     await h.click(MARKER, "rola:1:marker")
     assert "Недостаточно прав" in h.session.last("AnswerCallbackQuery").text
 
@@ -241,6 +277,19 @@ async def test_full_flow(h: Harness):
     assert any("запрос одобрен" in m for m in h.session.messages_to(STUDENT))
     assert await h.repo.count_open_requests() == 0
 
+    # current-month Excel from the main menu (open period, so interim)
+    await h.text(MARKER, "/menu")
+    assert h.buttons()["📑 Отчёт за текущий месяц"] == "s:rep"
+    assert h.buttons()["📑 Отчёт за прошлый месяц"] == "s:rpr"
+    await h.click(MARKER, "s:rep")
+    current = h.session.last("SendDocument")
+    assert current is not None and current.document.filename.startswith("Промежуточный_отчёт_")
+    assert current.document.filename.endswith(".xlsx")
+    assert "Промежуточный отчёт:" in current.caption
+    await h.click(MARKER, "s:rpr")
+    assert h.session.last("AnswerCallbackQuery").text == "Прошлого месяца ещё нет."
+    assert h.session.last("SendDocument") is current
+
     # close the month at event3, then report
     await h.click(MARKER, "s:mon")
     await h.press(MARKER, "Текущий")
@@ -251,6 +300,12 @@ async def test_full_flow(h: Harness):
     doc = h.session.last("SendDocument")
     assert doc is not None and doc.document.filename.endswith(".xlsx")
     assert "Отчёт: Сентябрь 2026" in doc.caption
+    await h.text(MARKER, "/menu")
+    await h.click(MARKER, "s:rpr")
+    previous = h.session.last("SendDocument")
+    assert previous is not None and previous is not doc
+    assert previous.document.filename.endswith(".xlsx")
+    assert "Отчёт: Сентябрь 2026" in previous.caption
 
     # the next event opens a new period automatically
     await h.click(MARKER, "s:new")
@@ -279,6 +334,7 @@ async def test_full_flow(h: Harness):
     await h.click(MARKER, "s:aud")
     text = h.last_text()
     assert "Журнал действий" in text and "(отмечающий) открыл месяц обратно" in text
+    await h.press(MARKER, "»")
     await h.press(MARKER, "»")
     await h.press(MARKER, "»")
     assert "(суперадмин) добавил студента" in h.last_text()

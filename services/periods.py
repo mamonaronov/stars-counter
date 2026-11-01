@@ -67,6 +67,14 @@ def build_periods(events: list[Event], today: date) -> list[Period]:
     return periods
 
 
+def previous_closed_period(periods: list[Period]) -> Period | None:
+    """The last closed period. The open period is always the final item."""
+    if len(periods) < 2:
+        return None
+    period = periods[-2]
+    return period if period.closed else None
+
+
 def find_period(periods: list[Period], key: str) -> Period | None:
     for period in periods:
         if period.key == key:

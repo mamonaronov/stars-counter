@@ -48,7 +48,7 @@ def test_report_journal_layout():
     assert (ws["I4"].value, ws["J4"].value, ws["K4"].value) == (1, None, 1)
     assert ws["L3"].value is None
     assert ws["L4"].value == "=SUM(I4:K4)"
-    assert ws["J3"].fill.fgColor.theme == 9
+    assert ws["J3"].fill.fgColor.rgb.endswith("FCE5CD")
 
     assert ws["B5"].value == "Антонов Антон"
     assert ws["A5"].value == 3
@@ -73,6 +73,13 @@ def test_report_journal_layout():
     assert ws["F7"].fill.fgColor.rgb.endswith("D9EAD3")
     assert ws["G8"].value == "Освобождение по мед причине"
     assert ws["F8"].fill.fgColor.rgb.endswith("C9DAF8")
+    assert ws["G9"].value == "Свободный день"
+    assert ws["F9"].fill.fgColor.rgb.endswith("FCE5CD")
+    assert ws["G10"].value == "Вне срока ученика"
+    assert ws["F10"].fill.fgColor.rgb.endswith("C9EDED")
+    assert ws["G11"].value is None
+    assert ws["F10"].border.bottom.style == "thick"
+    assert ws["H10"].border.right.style == "thick"
     assert ws["I8"].value == "=SUM(I5:I6)"
     assert ws["I7"].value == "=I8/2"
     assert ws["I7"].number_format == "0.00%"
@@ -125,6 +132,11 @@ def test_report_percent_formulas_and_interim_mark():
     assert (ws["I5"].value, ws["J5"].value, ws["K5"].value) == (1, 1, 1)
     assert (ws["I6"].value, ws["J6"].value, ws["K6"].value) == (1, None, None)
     assert len(ws.conditional_formatting._cf_rules) == 1
+    rules = next(iter(ws.conditional_formatting._cf_rules.values()))
+    assert [rule.formula[0] for rule in rules] == ["0.85", "0.7", "0.6", "0.5", "0"]
+    assert all(rule.stopIfTrue for rule in rules)
+    assert rules[0].dxf.fill.bgColor.rgb.endswith("B6D7A8")
+    assert rules[-1].dxf.fill.bgColor.rgb.endswith("EA9999")
 
 
 def test_same_day_lessons_share_a_header():
@@ -172,7 +184,7 @@ def test_late_joiner_uses_own_denominator():
     assert ws["C6"].value == "=D6/SUM($J$4:$J$4)"
     assert ws["D6"].value == "=SUM(J6:J6)"
     assert (ws["I6"].value, ws["J6"].value) == (None, 1)
-    assert ws["I6"].fill.fgColor.rgb.endswith("00FFFF")
+    assert ws["I6"].fill.fgColor.rgb.endswith("C9EDED")
 
 
 def test_free_lesson_inside_a_mandatory_day_stays_plain():
