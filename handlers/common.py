@@ -11,7 +11,7 @@ from config import Config
 from database.models import Event, Student
 from database.queries import Repo
 from keyboards.main import main_menu, students_picker_kb
-from services.periods import Period, build_periods, period_range_text
+from services.periods import Period, build_periods, ensure_scheduled_month_end, period_range_text
 from services.roles import LEVEL_MARKER, Actor
 from services.stats import STATUS_EXCUSED, STATUS_ICON, StudentStats, compute_student_stats
 from states import PickSG
@@ -111,6 +111,7 @@ async def respond(
 
 
 async def load_periods(repo: Repo, config: Config) -> list[Period]:
+    await ensure_scheduled_month_end(repo)
     events = await repo.list_events()
     return build_periods(events, local_today(config.timezone))
 

@@ -32,37 +32,68 @@ from utils.time import now_utc, to_iso
 logger = logging.getLogger(__name__)
 
 # A probe that got an answer is a ping. Mihomo lookup errors share this column
-# and only mean the node name is unknown.
+# and only mean the node name is unknown. A sample without an answer is not a
+# latency: it ranks after every successful ping, so the tail still counts it.
 _VPN_OK_PING_SQL = "ok = 1 AND latency_ms IS NOT NULL"
 _VPN_SAMPLE_COLS = "id, measured_at, ok, latency_ms, node_name, subscription, error, host_uptime_s"
+_VPN_TAIL_LEVELS = (("p95", 0.95), ("p99", 0.99), ("p99_9", 0.999))
 
 
-def _latency_percentile(sorted_ms: list[int], p: float) -> int | None:
-    if not sorted_ms:
-        return None
-    n = len(sorted_ms)
-    idx = min(n - 1, max(0, math.ceil(p * n) - 1))
-    return sorted_ms[idx]
+def _percentile_index(n: int, p: float) -> int:
+    return min(n - 1, max(0, math.ceil(p * n) - 1))
 
 
-def _count_ge(values: list[int], threshold: int | None) -> int:
-    if threshold is None:
-        return 0
-    return sum(1 for value in values if value >= threshold)
+def _tail_from_sorted(ok_sorted: list[int], no_ping: int, p: float) -> tuple[int | None, bool, int, int]:
+    """Percentile of successful pings, with no-ping samples ranked after all of them.
+
+    Returns (latency_ms, is_no_ping, ping_count, no_ping_count).
+    ping_count is successful samples at least as slow as the chosen latency.
+    Every no-ping sample is worse than any successful ping, so it belongs to that tail.
+    When the chosen rank is itself a no-ping, those samples are tied with each other.
+    """
+    ok_n = len(ok_sorted)
+    n = ok_n + no_ping
+    if n <= 0:
+        return None, False, 0, 0
+    if _percentile_index(n, p) >= ok_n:
+        return None, True, 0, no_ping
+    threshold = ok_sorted[_percentile_index(n, p)]
+    ping_count = sum(1 for value in ok_sorted if value >= threshold)
+    return threshold, False, ping_count, no_ping
 
 
-def _apply_vpn_tail_stats(items: list[dict[str, Any]], grouped: dict[Any, list[int]], key) -> None:
+def _write_tail(item: dict[str, Any], name: str, tail: tuple[int | None, bool, int, int]) -> None:
+    ms, is_no_ping, ping_count, no_ping_count = tail
+    item[f"{name}_ms"] = ms
+    item[f"{name}_no_ping"] = is_no_ping
+    item[f"{name}_count"] = ping_count
+    item[f"{name}_no_ping_count"] = no_ping_count
+
+
+def _split_vpn_tail_rows(rows, key) -> tuple[dict[Any, list[int]], dict[Any, int]]:
+    ok_grouped: dict[Any, list[int]] = defaultdict(list)
+    nop_grouped: dict[Any, int] = defaultdict(int)
+    for sample in rows:
+        group_key = key(sample)
+        if sample["ok"] and sample["latency_ms"] is not None:
+            ok_grouped[group_key].append(int(sample["latency_ms"]))
+        else:
+            nop_grouped[group_key] += 1
+    return ok_grouped, nop_grouped
+
+
+def _apply_vpn_tail_stats(
+    items: list[dict[str, Any]],
+    ok_grouped: dict[Any, list[int]],
+    nop_grouped: dict[Any, int],
+    key,
+) -> None:
     for item in items:
-        values = sorted(grouped.get(key(item), []))
-        p95_ms = _latency_percentile(values, 0.95)
-        p99_ms = _latency_percentile(values, 0.99)
-        p99_9_ms = _latency_percentile(values, 0.999)
-        item["p95_ms"] = p95_ms
-        item["p99_ms"] = p99_ms
-        item["p99_9_ms"] = p99_9_ms
-        item["p95_count"] = _count_ge(values, p95_ms)
-        item["p99_count"] = _count_ge(values, p99_ms)
-        item["p99_9_count"] = _count_ge(values, p99_9_ms)
+        group_key = key(item)
+        ok_sorted = sorted(ok_grouped.get(group_key, []))
+        no_ping = int(nop_grouped.get(group_key, 0))
+        for name, p in _VPN_TAIL_LEVELS:
+            _write_tail(item, name, _tail_from_sorted(ok_sorted, no_ping, p))
 
 
 def _empty_vpn_summary() -> dict[str, Any]:
@@ -77,9 +108,15 @@ def _empty_vpn_summary() -> dict[str, Any]:
         "p95_ms": None,
         "p99_ms": None,
         "p99_9_ms": None,
+        "p95_no_ping": False,
+        "p99_no_ping": False,
+        "p99_9_no_ping": False,
         "p95_count": 0,
         "p99_count": 0,
         "p99_9_count": 0,
+        "p95_no_ping_count": 0,
+        "p99_no_ping_count": 0,
+        "p99_9_no_ping_count": 0,
         "bucket_0_100": 0,
         "bucket_100_500": 0,
         "bucket_500_1000": 0,
@@ -1106,33 +1143,8 @@ class Repo:
         total = int(row["total"]) if row else 0
         ok_count = int(row["ok_count"]) if row else 0
         measured = int(row["measured"]) if row else 0
-        p95_ms = None
-        p99_ms = None
-        p99_9_ms = None
-        p95_count = 0
-        p99_count = 0
-        p99_9_count = 0
-        if measured > 0:
-            p95_ms = await self._vpn_latency_percentile(start, end, 0.95, measured)
-            p99_ms = await self._vpn_latency_percentile(start, end, 0.99, measured)
-            p99_9_ms = await self._vpn_latency_percentile(start, end, 0.999, measured)
-            counts = await self.vpn_fetchone(
-                """
-                SELECT
-                    COALESCE(SUM(CASE WHEN latency_ms >= ? THEN 1 ELSE 0 END), 0) AS p95_count,
-                    COALESCE(SUM(CASE WHEN latency_ms >= ? THEN 1 ELSE 0 END), 0) AS p99_count,
-                    COALESCE(SUM(CASE WHEN latency_ms >= ? THEN 1 ELSE 0 END), 0) AS p99_9_count
-                FROM vpn_latency_samples
-                WHERE latency_ms IS NOT NULL
-                  AND measured_at >= ? AND measured_at < ?
-                """,
-                (p95_ms, p99_ms, p99_9_ms, start, end),
-            )
-            if counts:
-                p95_count = int(counts["p95_count"])
-                p99_count = int(counts["p99_count"])
-                p99_9_count = int(counts["p99_9_count"])
-        return {
+        no_ping = int(row["no_ping"]) if row else 0
+        summary = {
             "total": total,
             "ok_count": ok_count,
             "fail_count": total - ok_count,
@@ -1140,32 +1152,68 @@ class Repo:
             "avg_ms": row["avg_ms"] if row else None,
             "min_ms": row["min_ms"] if row else None,
             "max_ms": row["max_ms"] if row else None,
-            "p95_ms": p95_ms,
-            "p99_ms": p99_ms,
-            "p99_9_ms": p99_9_ms,
-            "p95_count": p95_count,
-            "p99_count": p99_count,
-            "p99_9_count": p99_9_count,
             "bucket_0_100": int(row["bucket_0_100"]) if row else 0,
             "bucket_100_500": int(row["bucket_100_500"]) if row else 0,
             "bucket_500_1000": int(row["bucket_500_1000"]) if row else 0,
             "bucket_1000": int(row["bucket_1000"]) if row else 0,
-            "no_ping": int(row["no_ping"]) if row else 0,
+            "no_ping": no_ping,
         }
+        ok_n = total - no_ping
+        pending: list[tuple[str, int]] = []
+        for name, p in _VPN_TAIL_LEVELS:
+            if total <= 0:
+                _write_tail(summary, name, (None, False, 0, 0))
+                continue
+            idx = _percentile_index(total, p)
+            if idx >= ok_n:
+                _write_tail(summary, name, (None, True, 0, no_ping))
+            else:
+                pending.append((name, idx))
+        if pending:
+            thresholds: list[int] = []
+            names: list[str] = []
+            for name, idx in pending:
+                latency = await self._vpn_ok_latency_at(start, end, idx)
+                if latency is None:
+                    _write_tail(summary, name, (None, False, 0, 0))
+                    continue
+                names.append(name)
+                thresholds.append(latency)
+            counts = await self._vpn_ok_counts_ge(start, end, thresholds)
+            for name, latency, ping_count in zip(names, thresholds, counts, strict=True):
+                _write_tail(summary, name, (latency, False, ping_count, no_ping))
+        return summary
 
-    async def _vpn_latency_percentile(self, start: str, end: str, p: float, measured: int) -> int | None:
-        offset = min(measured - 1, max(0, math.ceil(p * measured) - 1))
+    async def _vpn_ok_latency_at(self, start: str, end: str, offset: int) -> int | None:
         row = await self.vpn_fetchone(
-            """
+            f"""
             SELECT latency_ms FROM vpn_latency_samples
-            WHERE latency_ms IS NOT NULL
+            WHERE {_VPN_OK_PING_SQL}
               AND measured_at >= ? AND measured_at < ?
             ORDER BY latency_ms
             LIMIT 1 OFFSET ?
             """,
             (start, end, offset),
         )
-        return row["latency_ms"] if row else None
+        return int(row["latency_ms"]) if row else None
+
+    async def _vpn_ok_counts_ge(self, start: str, end: str, thresholds: list[int]) -> list[int]:
+        if not thresholds:
+            return []
+        cols = ", ".join(
+            f"COALESCE(SUM(CASE WHEN latency_ms >= ? THEN 1 ELSE 0 END), 0) AS c{i}"
+            for i in range(len(thresholds))
+        )
+        row = await self.vpn_fetchone(
+            f"""
+            SELECT {cols}
+            FROM vpn_latency_samples
+            WHERE {_VPN_OK_PING_SQL}
+              AND measured_at >= ? AND measured_at < ?
+            """,
+            (*thresholds, start, end),
+        )
+        return [int(row[f"c{i}"]) if row else 0 for i in range(len(thresholds))]
 
     async def vpn_top_nodes(self, start: str, end: str, limit: int = 5) -> list[dict[str, Any]]:
         if self.db.vpn_db is None:
@@ -1198,18 +1246,19 @@ class Repo:
             params.extend([item["node_name"], item["subscription"]])
         lat_rows = await self.vpn_fetchall(
             f"""
-            SELECT node_name, subscription, latency_ms
+            SELECT node_name, subscription, ok, latency_ms
             FROM vpn_latency_samples
             WHERE measured_at >= ? AND measured_at < ?
-              AND ok = 1 AND latency_ms IS NOT NULL
               AND ({" OR ".join(clauses)})
             """,
             params,
         )
-        grouped: dict[tuple[Any, Any], list[int]] = defaultdict(list)
-        for sample in lat_rows:
-            grouped[(sample["node_name"], sample["subscription"])].append(int(sample["latency_ms"]))
-        _apply_vpn_tail_stats(result, grouped, lambda item: (item["node_name"], item["subscription"]))
+        ok_grouped, nop_grouped = _split_vpn_tail_rows(
+            lat_rows, lambda sample: (sample["node_name"], sample["subscription"])
+        )
+        _apply_vpn_tail_stats(
+            result, ok_grouped, nop_grouped, lambda item: (item["node_name"], item["subscription"])
+        )
         return result
 
     async def vpn_top_subscriptions(self, start: str, end: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -1239,16 +1288,13 @@ class Repo:
         params: list[Any] = [start, end, *[item["subscription"] for item in result]]
         lat_rows = await self.vpn_fetchall(
             f"""
-            SELECT subscription, latency_ms
+            SELECT subscription, ok, latency_ms
             FROM vpn_latency_samples
             WHERE measured_at >= ? AND measured_at < ?
-              AND ok = 1 AND latency_ms IS NOT NULL
               AND ({" OR ".join(clauses)})
             """,
             params,
         )
-        grouped: dict[Any, list[int]] = defaultdict(list)
-        for sample in lat_rows:
-            grouped[sample["subscription"]].append(int(sample["latency_ms"]))
-        _apply_vpn_tail_stats(result, grouped, lambda item: item["subscription"])
+        ok_grouped, nop_grouped = _split_vpn_tail_rows(lat_rows, lambda sample: sample["subscription"])
+        _apply_vpn_tail_stats(result, ok_grouped, nop_grouped, lambda item: item["subscription"])
         return result

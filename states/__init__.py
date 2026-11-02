@@ -56,6 +56,7 @@ class RejectSG(StatesGroup):
 
 class MonthSG(StatesGroup):
     rename = State()
+    ends_on = State()
 
 
 class PickSG(StatesGroup):

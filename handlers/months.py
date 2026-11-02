@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -12,9 +13,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Config
 from database.queries import MonthBoundaryError, Repo
 from handlers.common import event_title_line, load_periods, period_header, require_level, respond
-from keyboards.main import btn, cancel_kb, confirm_kb, nav_row, periods_kb
+from keyboards.main import btn, calendar_kb, cancel_kb, confirm_kb, date_quick_kb, nav_row, periods_kb
 from services.audit import audit
-from services.periods import OPEN_KEY, Period, find_period, period_index, previous_closed_period, students_for_period
+from services.periods import (
+    OPEN_KEY,
+    Period,
+    ensure_scheduled_month_end,
+    find_period,
+    month_end_date_is_taken,
+    period_index,
+    previous_closed_period,
+    scheduled_end_is_pending,
+    scheduled_month_end,
+    drop_scheduled_month_end_unless,
+    set_scheduled_month_end,
+    students_for_period,
+)
 from services.report import build_report_xlsx
 from services.roles import LEVEL_NONE, Actor
 from services.stats import StudentStats, compute_group_stats
@@ -22,6 +36,7 @@ from states import MonthSG
 from utils.callbacks import SEC_MONTHS, SEC_REPORT_PREV, SEC_REPORTS
 from utils.formatting import esc, percent_text
 from utils.telegram import answer_callback, bytes_file
+from utils.time import format_date, local_today, parse_date_text
 
 router = Router(name="months")
 
@@ -41,6 +56,7 @@ async def show_months(target: CallbackQuery | Message, repo: Repo, config: Confi
     text = (
         "🗓 <b>Месяцы и отчёты</b>\n\n"
         "Месяц заканчивается занятием, которое отмечено как последнее. "
+        "Дату конца можно назначить заранее: последнее занятие этого дня закроет месяц. "
         "Следующее занятие автоматически открывает новый месяц."
     )
     await respond(target, text, periods_kb(periods, "mon"))
@@ -55,7 +71,13 @@ async def show_month_card(
     notice: str | None = None,
     can_manage: bool = False,
 ) -> None:
+    moved = await ensure_scheduled_month_end(repo)
     periods = await load_periods(repo, config)
+    if moved is not None and (key == OPEN_KEY or find_period(periods, key) is None):
+        opened_current = key == OPEN_KEY
+        key = str(moved.id)
+        if opened_current or notice is None:
+            notice = "Месяц закрыт последним занятием этого дня"
     period = find_period(periods, key)
     if period is None:
         if isinstance(target, CallbackQuery):
@@ -67,13 +89,27 @@ async def show_month_card(
     ]
     if period.closer:
         lines.append(f"Последнее занятие: {event_title_line(period.closer)}")
+    planned = await scheduled_month_end(repo)
+    planned_pending = planned is not None and not period.closed and scheduled_end_is_pending(periods, planned)
+    if planned_pending and planned is not None:
+        lines.append(
+            f"Конец месяца: <b>{format_date(planned)}</b>. "
+            "Последнее занятие этого дня закроет месяц."
+        )
+    elif planned is not None and period.closer is not None and period.closer.day == planned:
+        lines.append(f"Дата конца месяца: {format_date(planned)}")
     b = InlineKeyboardBuilder()
     b.row(btn("📑 Отчёт Excel", f"monx:{period.key}"), btn("📊 Сводка", f"mons:{period.key}"))
     if can_manage and period.closed:
         b.row(btn("🔁 Другое последнее занятие", f"monc:{period.key}"))
         b.row(btn("✏️ Переименовать", f"monr:{period.key}"), btn("❌ Открыть обратно", f"mono:{period.key}"))
-    elif can_manage and period.events:
-        b.row(btn("🔚 Закрыть месяц", f"monc:{period.key}"))
+    elif can_manage:
+        if period.events:
+            b.row(btn("🔚 Закрыть месяц", f"monc:{period.key}"))
+        if planned_pending and planned is not None:
+            b.row(btn(f"📅 Конец: {format_date(planned)}", "med"), btn("✖️ Убрать дату", "medx"))
+        else:
+            b.row(btn("📅 Назначить конец месяца", "med"))
     b.row(*nav_row(SEC_MONTHS))
     await respond(target, "\n".join(lines), b.as_markup(), notice=notice)
 
@@ -280,7 +316,125 @@ async def month_set_closer(cb: CallbackQuery, repo: Repo, config: Config, actor:
         месяц=period.title,
         последнее_занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}",
     )
+    await drop_scheduled_month_end_unless(repo, event.day)
     await show_month_card(cb, repo, config, str(event.id), notice="Готово", can_manage=True)
+
+
+# --------------------------------------------------------------- scheduled end
+
+
+def _month_end_back(key: str) -> str:
+    return f"mon:{key}"
+
+
+async def _ask_month_end(target: CallbackQuery | Message, config: Config, *, back: str, planned: date | None) -> None:
+    when = f"Сейчас назначено: <b>{format_date(planned)}</b>.\n\n" if planned else ""
+    await respond(
+        target,
+        f"{when}Когда закончится этот месяц? Выберите дату в календаре или напишите, "
+        "например <code>20.12.2026</code>.\n\n"
+        "Последнее занятие этого дня станет концом месяца. Если занятия ещё нет, дата сохранится и сработает, когда оно появится.",
+        date_quick_kb("med", local_today(config.timezone), back=back),
+    )
+
+
+@router.callback_query(F.data == "med")
+async def month_end_start(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    periods = await load_periods(repo, config)
+    period = find_period(periods, OPEN_KEY)
+    if period is None:
+        await answer_callback(cb, "Текущий месяц не найден", show_alert=True)
+        return
+    planned = await scheduled_month_end(repo)
+    if planned is not None and not scheduled_end_is_pending(periods, planned):
+        planned = None
+    await state.set_state(MonthSG.ends_on)
+    await state.update_data(month_end_back=_month_end_back(period.key))
+    await _ask_month_end(cb, config, back=_month_end_back(period.key), planned=planned)
+
+
+@router.callback_query(MonthSG.ends_on, F.data.startswith("medm:"))
+async def month_end_calendar(cb: CallbackQuery, state: FSMContext) -> None:
+    year, month = cb.data.split(":", 1)[1].split("-")
+    data = await state.get_data()
+    await respond(
+        cb,
+        "Выберите дату конца месяца:",
+        calendar_kb(int(year), int(month), "med", back=data.get("month_end_back")),
+    )
+
+
+async def _save_month_end(
+    target: CallbackQuery | Message,
+    state: FSMContext,
+    repo: Repo,
+    config: Config,
+    actor: Actor,
+    day: date,
+) -> None:
+    periods = await load_periods(repo, config)
+    if month_end_date_is_taken(periods, day):
+        if isinstance(target, CallbackQuery):
+            await answer_callback(target, "Эта дата уже в закрытом месяце.", show_alert=True)
+        else:
+            await target.answer("Эта дата уже в закрытом месяце. Выберите день после него.")
+        return
+    await set_scheduled_month_end(repo, day)
+    await state.clear()
+    await audit(repo, actor, "month.schedule", дата=format_date(day))
+    await show_month_card(
+        target,
+        repo,
+        config,
+        OPEN_KEY,
+        notice="Дата конца месяца сохранена",
+        can_manage=True,
+    )
+
+
+@router.callback_query(MonthSG.ends_on, F.data.startswith("med:"))
+async def month_end_pick(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    if not await require_level(cb, actor):
+        await state.clear()
+        return
+    try:
+        day = date.fromisoformat(cb.data.split(":", 1)[1])
+    except ValueError:
+        await answer_callback(cb, "Некорректная дата", show_alert=True)
+        return
+    await _save_month_end(cb, state, repo, config, actor, day)
+
+
+@router.message(MonthSG.ends_on, F.text)
+async def month_end_text(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
+    if not await require_level(message, actor):
+        await state.clear()
+        return
+    try:
+        day = parse_date_text(message.text or "", today=local_today(config.timezone))
+    except ValueError:
+        data = await state.get_data()
+        await message.answer(
+            "Не понял дату. Примеры: <code>20.12</code>, <code>20.12.2026</code>.",
+            reply_markup=cancel_kb(data.get("month_end_back")),
+        )
+        return
+    await _save_month_end(message, state, repo, config, actor, day)
+
+
+@router.callback_query(F.data == "medx")
+async def month_end_clear(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    assert actor is not None
+    await state.clear()
+    planned = await scheduled_month_end(repo)
+    await set_scheduled_month_end(repo, None)
+    if planned is not None:
+        await audit(repo, actor, "month.unschedule", дата=format_date(planned))
+    await show_month_card(cb, repo, config, OPEN_KEY, notice="Дата конца месяца убрана", can_manage=True)
 
 
 # ---------------------------------------------------------------- rename
@@ -352,6 +506,7 @@ async def month_reopen(cb: CallbackQuery, repo: Repo, config: Config, actor: Act
         await answer_callback(cb, "Период не найден", show_alert=True)
         return
     title = event.month_title or ""
+    await set_scheduled_month_end(repo, None)
     await repo.update_event(event.id, closes_month=0, month_title=None)
     await audit(repo, actor, "month.reopen", entity_type="event", entity_id=event.id, месяц=title or None, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}")
     await answer_callback(cb, "Месяц открыт")

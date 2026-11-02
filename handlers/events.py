@@ -30,7 +30,7 @@ from keyboards.main import (
     time_kb,
 )
 from services.audit import audit, format_audit_entry
-from services.periods import period_of_event, period_range_text
+from services.periods import drop_scheduled_month_end_unless, period_of_event, period_range_text, set_scheduled_month_end
 from services.roles import Actor
 from states import EditEventSG, NewEventSG
 from utils.callbacks import NAV_MAIN, SEC_EVENTS, SEC_NEW_EVENT
@@ -520,6 +520,13 @@ async def toggle_closer(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
         return
     if mode == "on":
         periods = await load_periods(repo, config)
+        event = await repo.get_event(event.id)
+        if event is None or event.deleted_at:
+            await answer_callback(cb, "Занятие не найдено", show_alert=True)
+            return
+        if event.closes_month:
+            await show_event_card(cb, repo, config, event.id, notice="Это занятие уже последнее в месяце")
+            return
         period = period_of_event(periods, event.id)
         moved = period is not None and period.closer is not None and period.closer.id != event.id
         kept_title = period.closer.month_title if moved and period and period.closer else None
@@ -540,8 +547,10 @@ async def toggle_closer(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
             entity_id=event.id,
             последнее_занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}",
         )
+        await drop_scheduled_month_end_unless(repo, event.day)
         notice = "Конец месяца перенесён" if moved else "Теперь это последнее занятие месяца"
     else:
+        await set_scheduled_month_end(repo, None)
         await repo.update_event(event.id, closes_month=0, month_title=None)
         await audit(repo, actor, "month.reopen", entity_type="event", entity_id=event.id, занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}")
         notice = "Месяц открыт обратно"
@@ -586,9 +595,13 @@ async def delete_event(cb: CallbackQuery, repo: Repo, config: Config, actor: Act
     if event is None or event.deleted_at:
         await answer_callback(cb, "Занятие не найдено", show_alert=True)
         return
+    periods = await load_periods(repo, config)
+    event = await repo.get_event(event.id)
+    if event is None or event.deleted_at:
+        await answer_callback(cb, "Занятие не найдено", show_alert=True)
+        return
     successor_id = None
     if event.closes_month:
-        periods = await load_periods(repo, config)
         period = period_of_event(periods, event.id)
         if period is not None and len(period.events) > 1:
             successor_id = period.events[-2].id

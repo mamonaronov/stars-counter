@@ -21,6 +21,8 @@ ACTION_TITLES: dict[str, str] = {
     "event.update": "изменил занятие",
     "event.delete": "удалил занятие",
     "month.close": "закрыл месяц",
+    "month.schedule": "назначил конец месяца",
+    "month.unschedule": "убрал дату конца месяца",
     "month.reopen": "открыл месяц обратно",
     "month.move": "перенёс конец месяца",
     "month.rename": "переименовал месяц",

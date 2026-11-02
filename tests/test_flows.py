@@ -104,6 +104,7 @@ async def test_guest_can_download_reports_but_not_close_months(h: Harness):
     await h.click(GUEST, "s:mon")
     await h.press(GUEST, "Текущий")
     assert "Закрыть месяц" not in h.buttons()
+    assert "Назначить конец месяца" not in h.buttons()
     await h.click(GUEST, "s:mon")
     await h.press(GUEST, "Сентябрь 2026")
     labels = h.buttons()
@@ -467,6 +468,42 @@ async def test_time_edit_tells_when_event_changes_month(h: Harness):
     await h.text(SUPER, "08:00")
     assert "теперь в месяце «Сентябрь 2026»" in h.last_text()
     assert (await h.repo.get_event(later.id)).start_time == "08:00"
+
+
+async def test_month_end_can_be_chosen_ahead_of_the_lesson(h: Harness):
+    november = await h.repo.create_event("Ноябрь", "mandatory", "2026-11-03", None, None, SUPER)
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, "s:mon")
+    await h.press(SUPER, "Текущий")
+    await h.press(SUPER, "Назначить конец месяца")
+    await h.text(SUPER, "не дата")
+    assert "Не понял дату" in h.last_text()
+    await h.text(SUPER, "20.12.2026")
+    assert "20.12.2026" in h.last_text()
+    assert "Конец месяца" in h.last_text()
+    assert await h.repo.db.get_system("open_month_ends_on") == "2026-12-20"
+    assert (await h.repo.get_event(november.id)).closes_month == 0
+
+    morning = await h.repo.create_event("Утро", "mandatory", "2026-12-20", "09:00", None, SUPER)
+    await h.click(SUPER, "s:mon")
+    assert (await h.repo.get_event(morning.id)).closes_month == 1
+    assert (await h.repo.get_event(november.id)).closes_month == 0
+    assert any("Декабрь 2026" in label for label in h.buttons())
+
+    afternoon = await h.repo.create_event("День", "mandatory", "2026-12-20", "12:00", None, SUPER)
+    await h.click(SUPER, "s:mon")
+    assert (await h.repo.get_event(afternoon.id)).closes_month == 1
+    assert (await h.repo.get_event(morning.id)).closes_month == 0
+
+    await h.press(SUPER, "Текущий")
+    await h.press(SUPER, "Назначить конец месяца")
+    await h.click(SUPER, "med:2026-11-01")
+    assert "уже в закрытом месяце" in h.session.last("AnswerCallbackQuery").text
+    assert await h.repo.db.get_system("open_month_ends_on") == "2026-12-20"
+
+    await h.click(SUPER, "medx")
+    assert await h.repo.db.get_system("open_month_ends_on") in (None, "")
+    assert "убрана" in (h.session.last("AnswerCallbackQuery").text or "")
 
 
 async def test_month_end_cannot_jump_over_a_period(h: Harness):

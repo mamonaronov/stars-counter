@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from datetime import date
+
 from services.periods import (
     OPEN_KEY,
     Period,
     build_periods,
     find_period,
+    lesson_that_closes_on,
+    month_end_date_is_taken,
     period_button_label,
     period_of_event,
     period_range_text,
     previous_closed_period,
+    scheduled_end_is_pending,
 )
 from tests.conftest import TODAY, event
 
@@ -70,6 +75,26 @@ def test_order_uses_time_then_id_within_a_day():
     # event without time sorts first, then 09:00 closes the month, 12:00 goes to the next period
     assert [e.id for e in periods[0].events] == [2, 1]
     assert [e.id for e in periods[1].events] == [3]
+
+
+def test_scheduled_end_uses_the_last_lesson_that_day():
+    events = [
+        event(1, "2026-12-20", time="09:00"),
+        event(2, "2026-12-20", time="12:00"),
+        event(3, "2026-12-21"),
+    ]
+    assert lesson_that_closes_on(events, date(2026, 12, 20)).id == 2
+    assert lesson_that_closes_on(events, date(2026, 12, 22)) is None
+
+
+def test_scheduled_end_stays_ahead_of_a_closed_month():
+    closed = event(1, "2026-11-30", closes=True)
+    current = event(2, "2026-12-02")
+    periods = build_periods([closed, current], TODAY)
+    assert scheduled_end_is_pending(periods, date(2026, 12, 20))
+    assert not scheduled_end_is_pending(periods, date(2026, 11, 30))
+    assert month_end_date_is_taken(periods, date(2026, 11, 1))
+    assert not month_end_date_is_taken(periods, date(2026, 12, 20))
 
 
 def test_mandatory_and_free_counts():

@@ -85,8 +85,12 @@ async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
     assert summary["bucket_100_500"] == 1
     assert summary["bucket_1000"] == 1
     assert summary["no_ping"] == 1
-    assert summary["p95_ms"] == 8000
-    assert summary["p95_count"] == 1
+    assert summary["p95_no_ping"] is True
+    assert summary["p99_no_ping"] is True
+    assert summary["p99_9_no_ping"] is True
+    assert summary["p95_ms"] is None
+    assert summary["p95_count"] == 0
+    assert summary["p95_no_ping_count"] == 1
 
     text = await _vpn_report(repo, repo.db.config, "24h", view="n")
     assert text.startswith("🛡 <b>VPN / задержка бота</b>")
@@ -103,6 +107,8 @@ async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
     assert "0–100 мс" in text
     assert "сервер выключен" in text
     assert "сервис не запущен" in text
+    assert "p95: нет пинга (0 зам., 1 без пинга)" in html.unescape(text)
+    assert "p95 нет пинга (0 зам., 1 без пинга)" in text
 
     subs = await _vpn_report(repo, repo.db.config, "24h", view="s")
     assert "Топ подписок:" in subs
@@ -127,6 +133,32 @@ async def h(tmp_path):
         yield Harness(config, db)
     finally:
         await db.close()
+
+
+async def test_percentiles_keep_fast_failures_in_the_tail(repo):
+    now = to_iso(now_utc())
+    for _ in range(20):
+        await repo.insert_vpn_sample(now, True, 100, "n", "sub", None, 1.0)
+    await repo.insert_vpn_sample(now, False, 50, "n", "sub", "timeout", 1.0)
+    start = "2000-01-01T00:00:00+00:00"
+    end = "2999-01-01T00:00:00+00:00"
+    summary = await repo.vpn_latency_summary(start, end)
+    assert summary["p95_ms"] == 100
+    assert summary["p95_no_ping"] is False
+    assert summary["p95_count"] == 20
+    assert summary["p95_no_ping_count"] == 1
+    assert summary["p99_no_ping"] is True
+    assert summary["p99_no_ping_count"] == 1
+
+    text = html.unescape(await _vpn_report(repo, repo.db.config, "24h", view="n"))
+    assert "20 зам., 1 без пинга" in text
+    assert "0 зам., 1 без пинга" in text
+    assert "нет пинга" in text
+    nodes = await repo.vpn_top_nodes(start, end)
+    assert nodes[0]["p95_ms"] == 100
+    assert nodes[0]["p95_count"] == 20
+    assert nodes[0]["p95_no_ping_count"] == 1
+    assert "p95 100 мс (20 зам., 1 без пинга)" in text
 
 
 async def test_superadmin_opens_uptime_from_service(h):

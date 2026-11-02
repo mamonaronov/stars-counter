@@ -63,6 +63,20 @@ def _ms(value) -> str:
     return str(int(round(value)))
 
 
+def _tail_text(row: dict, name: str) -> str:
+    """Latency tail, counting successful pings and samples with no ping."""
+    no_ping_count = int(row.get(f"{name}_no_ping_count") or 0)
+    ping_count = int(row.get(f"{name}_count") or 0)
+    if row.get(f"{name}_no_ping"):
+        return f"нет пинга ({ping_count} зам., {no_ping_count} без пинга)"
+    ms = row.get(f"{name}_ms")
+    if ms is None:
+        return "— мс (0 зам.)"
+    if no_ping_count:
+        return f"{_ms(ms)} мс ({ping_count} зам., {no_ping_count} без пинга)"
+    return f"{_ms(ms)} мс ({ping_count} зам.)"
+
+
 def _pct(count: int, total: int) -> str:
     if total <= 0:
         return "—"
@@ -91,7 +105,7 @@ def _vpn_top_item_lines(row: dict, title_html: str) -> list[str]:
     return [
         f"• {title_html}",
         f"\t{int(row['samples'])} раз, avg {_ms(row['avg_ms'])} мс,",
-        f"\tp95 {_ms(row['p95_ms'])} мс ({int(row['p95_count'])} зам.)",
+        f"\tp95 {_tail_text(row, 'p95')}",
     ]
 
 
@@ -184,9 +198,9 @@ async def _vpn_report(repo: Repo, config: Config, period_key: str, *, now=None, 
                     ("Средняя", f"{_ms(summary['avg_ms'])} мс"),
                     ("Минимум", f"{_ms(summary['min_ms'])} мс"),
                     ("Максимум", f"{_ms(summary['max_ms'])} мс"),
-                    ("p95", f"{_ms(summary['p95_ms'])} мс ({summary['p95_count']} зам.)"),
-                    ("p99", f"{_ms(summary['p99_ms'])} мс ({summary['p99_count']} зам.)"),
-                    ("p99.9", f"{_ms(summary['p99_9_ms'])} мс ({summary['p99_9_count']} зам.)"),
+                    ("p95", _tail_text(summary, "p95")),
+                    ("p99", _tail_text(summary, "p99")),
+                    ("p99.9", _tail_text(summary, "p99_9")),
                 ]
             ),
             "",
