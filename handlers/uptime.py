@@ -12,7 +12,8 @@ from aiogram.types import CallbackQuery
 from config import Config
 from database.queries import Repo
 from handlers.common import require_level, respond
-from keyboards.main import admin_vpn_kb
+from keyboards.main import admin_vpn_kb, confirm_kb
+from services.audit import audit
 from services.load_charts import build_load_chart
 from services.load_samples import capture_server_load
 from services.roles import LEVEL_SUPERADMIN, Actor
@@ -278,6 +279,48 @@ async def admin_vpn(cb: CallbackQuery, config: Config, repo: Repo, actor: Actor 
     period, view, rounded = _parse_vpn_view(cb.data)
     text = await _vpn_report(repo, config, period, view=view)
     await respond(cb, text, admin_vpn_kb(period, view, rounded=rounded))
+
+
+def _parse_vpn_wipe(data: str | None) -> tuple[str, str]:
+    period, view = "24h", "n"
+    parts = (data or "").split(":")
+    if len(parts) >= 2 and parts[1] in VPN_PERIODS:
+        period = parts[1]
+    if len(parts) >= 3 and parts[2] in {"n", "s", "a"}:
+        view = parts[2]
+    return period, view
+
+
+@router.callback_query(F.data.startswith("advw:"))
+async def admin_vpn_wipe_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_SUPERADMIN):
+        return
+    period, view = _parse_vpn_wipe(cb.data)
+    row = await repo.vpn_fetchone("SELECT COUNT(*) AS n FROM vpn_latency_samples")
+    count = int(row["n"]) if row else 0
+    await respond(
+        cb,
+        "Удалить <b>все</b> замеры пинга?\n\n"
+        f"Сейчас их {count}. Пропадут графики, логи и статистика задержки за любой период. "
+        "Load avg и остальные данные бота останутся.",
+        confirm_kb(f"advwc:{period}:{view}", f"adv:{period}:{view}", yes_text="🗑 Очистить"),
+    )
+
+
+@router.callback_query(F.data.startswith("advwc:"))
+async def admin_vpn_wipe(cb: CallbackQuery, config: Config, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_SUPERADMIN):
+        return
+    assert actor is not None
+    period, view = _parse_vpn_wipe(cb.data)
+    vpn = repo.db.vpn_db
+    if vpn is None:
+        await answer_callback(cb, "Нет базы замеров пинга", show_alert=True)
+        return
+    await vpn.wipe_samples()
+    await audit(repo, actor, "vpn.wipe", entity_type="vpn")
+    text = await _vpn_report(repo, config, period, view=view)
+    await respond(cb, text, admin_vpn_kb(period, view), notice="Замеры пинга удалены")
 
 
 @router.callback_query(F.data.startswith("adld:"))

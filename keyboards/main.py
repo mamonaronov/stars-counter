@@ -361,6 +361,7 @@ def admin_vpn_kb(period: str = "24h", view: str = "n", *, rounded: bool = False)
         chart_view = ":s" if view == "s" else ""
         b.row(btn(f"📈 Картинки за {span}", f"advc:{period}{chart_view}"))
     b.row(btn(f"📈 Load avg за {span}", f"adld:{period}"))
+    b.row(btn("🗑 Очистить пинги", f"advw:{period}:{view}"))
     b.row(btn("🛠 Сервис", SEC_SERVICE))
     return b.as_markup()
 

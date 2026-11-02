@@ -59,6 +59,7 @@ def test_uptime_keyboard_matches_daily_stats_periods():
     assert "📄 Логи за сутки" in texts
     assert "📈 Картинки за сутки" in texts
     assert "📈 Load avg за сутки" in texts
+    assert "🗑 Очистить пинги" in texts
     assert "5 мин" in texts and "всё время" in texts
 
 
@@ -175,6 +176,26 @@ async def test_superadmin_opens_uptime_from_service(h):
     assert "[Подписки]" in h.buttons()
     await h.press(1, "Сервис")
     assert "🛠" in h.last_text() or "Сервис" in h.last_text()
+
+
+async def test_superadmin_wipes_ping_samples_only(h):
+    now = to_iso(now_utc())
+    await h.repo.insert_vpn_sample(now, True, 40, "s1 | node", "sub1", None, 1.0)
+    await h.repo.db.load_db.record(now, 0.1, 0.2, 0.3)
+    await h.text(1, "/start")
+    await h.click(1, "s:srv")
+    await h.press(1, "Аптайм")
+    await h.press(1, "Очистить пинги")
+    assert "Удалить" in h.last_text() and "Load avg" in h.last_text()
+    await h.press(1, "Отмена")
+    assert await h.repo.vpn_fetchone("SELECT COUNT(*) AS n FROM vpn_latency_samples")
+    assert int((await h.repo.vpn_fetchone("SELECT COUNT(*) AS n FROM vpn_latency_samples"))["n"]) == 1
+    await h.press(1, "Очистить пинги")
+    await h.press(1, "Очистить")
+    assert int((await h.repo.vpn_fetchone("SELECT COUNT(*) AS n FROM vpn_latency_samples"))["n"]) == 0
+    assert "Замеров: 0" in h.last_text()
+    kept = await h.repo.db.load_db.list_between("2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00")
+    assert any(row[0] == now and row[1:] == (0.1, 0.2, 0.3) for row in kept)
 
 
 async def test_guest_cannot_open_uptime(h):
