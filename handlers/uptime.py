@@ -28,7 +28,7 @@ from services.vpn_monitor import format_vpn_log, subscription_label, vpn_samples
 from utils.formatting import colon_block, pre_html, seconds_human
 from utils.telegram import answer_callback, png_file, safe_send, text_file
 from utils.time import now_utc, parse_iso, to_iso
-from utils.uptime import host_uptime_seconds, uptime_report_lines
+from utils.uptime import bot_uptime_seconds, host_uptime_seconds, uptime_report_lines
 
 router = Router(name="uptime")
 logger = logging.getLogger(__name__)
@@ -76,6 +76,19 @@ def _tail_text(row: dict, name: str) -> str:
     if no_ping_count:
         return f"{_ms(ms)} мс ({ping_count} зам., {no_ping_count} без пинга)"
     return f"{_ms(ms)} мс ({ping_count} зам.)"
+
+
+def _p100ms_text(value) -> str:
+    """Digits of x in px, where that percentile is the latency mark."""
+    if value is None:
+        return "—"
+    rounded = round(float(value), 1)
+    if rounded <= 0:
+        return "p0"
+    if rounded >= 100:
+        return "p100"
+    text = f"{rounded:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+    return f"p{text}"
 
 
 def _pct(count: int, total: int) -> str:
@@ -150,7 +163,13 @@ def _vpn_period(period_key: str | None) -> tuple[str, timedelta | None, str]:
     return key, delta, title
 
 
-async def _vpn_window(repo: Repo, period_key: str, now: datetime | None = None) -> tuple[str, datetime, datetime, str]:
+async def _vpn_window(
+    repo: Repo,
+    period_key: str,
+    now: datetime | None = None,
+    *,
+    since_boot: bool = False,
+) -> tuple[str, datetime, datetime, str]:
     key, delta, title = _vpn_period(period_key)
     end = now or now_utc()
     if delta is None:
@@ -158,11 +177,28 @@ async def _vpn_window(repo: Repo, period_key: str, now: datetime | None = None) 
         start = parse_iso(earliest) if earliest else end
     else:
         start = end - delta
+    if since_boot:
+        uptime = bot_uptime_seconds()
+        if uptime is None:
+            title = f"{title}, запуск бота неизвестен"
+        else:
+            started = end - timedelta(seconds=uptime)
+            if started > start:
+                start = started
+            title = f"{title}, с запуска бота"
     return key, start, end, title
 
 
-async def _vpn_report(repo: Repo, config: Config, period_key: str, *, now=None, view: str = "n") -> str:
-    _key, start, end, title = await _vpn_window(repo, period_key, now)
+async def _vpn_report(
+    repo: Repo,
+    config: Config,
+    period_key: str,
+    *,
+    now=None,
+    view: str = "n",
+    since_boot: bool = False,
+) -> str:
+    _key, start, end, title = await _vpn_window(repo, period_key, now, since_boot=since_boot)
     start_iso, end_iso = to_iso(start), to_iso(end)
     summary = await repo.vpn_latency_summary(start_iso, end_iso)
     interval = max(1, config.vpn_monitor_interval_seconds)
@@ -202,6 +238,10 @@ async def _vpn_report(repo: Repo, config: Config, period_key: str, *, now=None, 
                     ("p95", _tail_text(summary, "p95")),
                     ("p99", _tail_text(summary, "p99")),
                     ("p99.9", _tail_text(summary, "p99_9")),
+                    ("p100мс", _p100ms_text(summary.get("p100ms"))),
+                    ("p300мс", _p100ms_text(summary.get("p300ms"))),
+                    ("p500мс", _p100ms_text(summary.get("p500ms"))),
+                    ("p1000мс", _p100ms_text(summary.get("p1000ms"))),
                 ]
             ),
             "",
@@ -233,31 +273,34 @@ async def _vpn_report(repo: Repo, config: Config, period_key: str, *, now=None, 
     return "\n".join(lines)
 
 
-def _parse_vpn_view(data: str | None) -> tuple[str, str, bool]:
-    period, view, rounded = "24h", "n", False
+def _parse_vpn_view(data: str | None) -> tuple[str, str, bool, bool]:
+    period, view, rounded, since_boot = "24h", "n", False, False
     if data and data.startswith("adv:"):
         parts = data.split(":")
         if len(parts) >= 2:
             period = parts[1] if parts[1] in VPN_PERIODS else "24h"
         if len(parts) >= 3 and parts[2] in {"n", "s", "a"}:
             view = parts[2]
-        if view == "a" and len(parts) >= 4 and parts[3] == "r":
-            rounded = True
-    return period, view, rounded
+        flags = parts[3:]
+        rounded = view == "a" and "r" in flags
+        since_boot = "b" in flags
+    return period, view, rounded, since_boot
 
 
-def _parse_vpn_chart(data: str | None) -> tuple[str, bool, bool, bool]:
-    period, availability, rounded, color_by_sub = "24h", False, False, False
+def _parse_vpn_chart(data: str | None) -> tuple[str, bool, bool, bool, bool]:
+    period, availability, rounded, color_by_sub, since_boot = "24h", False, False, False, False
     if data and data.startswith("advc:"):
         parts = data.split(":")
         if len(parts) >= 2:
             period = parts[1] if parts[1] in VPN_PERIODS else "24h"
-        if len(parts) >= 3 and parts[2] == "a":
+        flags = parts[2:]
+        if "a" in flags:
             availability = True
-            rounded = len(parts) >= 4 and parts[3] == "r"
-        elif len(parts) >= 3 and parts[2] == "s":
+            rounded = "r" in flags
+        elif "s" in flags:
             color_by_sub = True
-    return period, availability, rounded, color_by_sub
+        since_boot = "b" in flags
+    return period, availability, rounded, color_by_sub, since_boot
 
 
 async def _load_window(load_db, period_key: str):
@@ -276,34 +319,36 @@ async def _load_window(load_db, period_key: str):
 async def admin_vpn(cb: CallbackQuery, config: Config, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor, LEVEL_SUPERADMIN):
         return
-    period, view, rounded = _parse_vpn_view(cb.data)
-    text = await _vpn_report(repo, config, period, view=view)
-    await respond(cb, text, admin_vpn_kb(period, view, rounded=rounded))
+    period, view, rounded, since_boot = _parse_vpn_view(cb.data)
+    text = await _vpn_report(repo, config, period, view=view, since_boot=since_boot)
+    await respond(cb, text, admin_vpn_kb(period, view, rounded=rounded, since_boot=since_boot))
 
 
-def _parse_vpn_wipe(data: str | None) -> tuple[str, str]:
-    period, view = "24h", "n"
+def _parse_vpn_wipe(data: str | None) -> tuple[str, str, bool]:
+    period, view, since_boot = "24h", "n", False
     parts = (data or "").split(":")
     if len(parts) >= 2 and parts[1] in VPN_PERIODS:
         period = parts[1]
     if len(parts) >= 3 and parts[2] in {"n", "s", "a"}:
         view = parts[2]
-    return period, view
+    since_boot = "b" in parts[3:]
+    return period, view, since_boot
 
 
 @router.callback_query(F.data.startswith("advw:"))
 async def admin_vpn_wipe_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor, LEVEL_SUPERADMIN):
         return
-    period, view = _parse_vpn_wipe(cb.data)
+    period, view, since_boot = _parse_vpn_wipe(cb.data)
     row = await repo.vpn_fetchone("SELECT COUNT(*) AS n FROM vpn_latency_samples")
     count = int(row["n"]) if row else 0
+    boot = ":b" if since_boot else ""
     await respond(
         cb,
         "Удалить <b>все</b> замеры пинга?\n\n"
         f"Сейчас их {count}. Пропадут графики, логи и статистика задержки за любой период. "
         "Load avg и остальные данные бота останутся.",
-        confirm_kb(f"advwc:{period}:{view}", f"adv:{period}:{view}", yes_text="🗑 Очистить"),
+        confirm_kb(f"advwc:{period}:{view}{boot}", f"adv:{period}:{view}{boot}", yes_text="🗑 Очистить"),
     )
 
 
@@ -312,15 +357,15 @@ async def admin_vpn_wipe(cb: CallbackQuery, config: Config, repo: Repo, actor: A
     if not await require_level(cb, actor, LEVEL_SUPERADMIN):
         return
     assert actor is not None
-    period, view = _parse_vpn_wipe(cb.data)
+    period, view, since_boot = _parse_vpn_wipe(cb.data)
     vpn = repo.db.vpn_db
     if vpn is None:
         await answer_callback(cb, "Нет базы замеров пинга", show_alert=True)
         return
     await vpn.wipe_samples()
     await audit(repo, actor, "vpn.wipe", entity_type="vpn")
-    text = await _vpn_report(repo, config, period, view=view)
-    await respond(cb, text, admin_vpn_kb(period, view), notice="Замеры пинга удалены")
+    text = await _vpn_report(repo, config, period, view=view, since_boot=since_boot)
+    await respond(cb, text, admin_vpn_kb(period, view, since_boot=since_boot), notice="Замеры пинга удалены")
 
 
 @router.callback_query(F.data.startswith("adld:"))
@@ -357,8 +402,8 @@ async def admin_load_chart(cb: CallbackQuery, config: Config, repo: Repo, actor:
 async def admin_vpn_charts(cb: CallbackQuery, config: Config, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor, LEVEL_SUPERADMIN):
         return
-    period, availability, rounded, color_by_sub = _parse_vpn_chart(cb.data)
-    _period, start, end, title = await _vpn_window(repo, period)
+    period, availability, rounded, color_by_sub, since_boot = _parse_vpn_chart(cb.data)
+    _period, start, end, title = await _vpn_window(repo, period, since_boot=since_boot)
     await answer_callback(cb, "Строю графики")
     if cb.message is None:
         return
@@ -397,8 +442,13 @@ async def admin_vpn_charts(cb: CallbackQuery, config: Config, repo: Repo, actor:
 async def admin_vpn_log(cb: CallbackQuery, config: Config, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor, LEVEL_SUPERADMIN):
         return
-    raw = cb.data.split(":", 1)[1] if cb.data and cb.data.startswith("advl:") else "24h"
-    period, start, end, title = await _vpn_window(repo, raw)
+    period, since_boot = "24h", False
+    if cb.data and cb.data.startswith("advl:"):
+        parts = cb.data.split(":")
+        if len(parts) >= 2 and parts[1] in VPN_PERIODS:
+            period = parts[1]
+        since_boot = "b" in parts[2:]
+    period, start, end, title = await _vpn_window(repo, period, since_boot=since_boot)
     if period == "all" and start == end:
         start = _VPN_LOG_EPOCH
     start_iso, end_iso = to_iso(start), to_iso(end)
@@ -418,4 +468,4 @@ async def admin_vpn_log(cb: CallbackQuery, config: Config, repo: Repo, actor: Ac
         caption=f"VPN-логи за {title} · {len(payload)} записей",
     )
     if sent is None:
-        await respond(cb, "Не удалось отправить файл логов.", admin_vpn_kb(period))
+        await respond(cb, "Не удалось отправить файл логов.", admin_vpn_kb(period, since_boot=since_boot))

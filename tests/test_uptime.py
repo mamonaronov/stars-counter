@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import html
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from config import REQUIRED_DB_VERSION
-from handlers.uptime import _vpn_report
+from handlers.uptime import _parse_vpn_chart, _parse_vpn_view, _vpn_report
 from keyboards.main import admin_vpn_kb
 from utils.time import now_utc, to_iso
 
@@ -60,7 +61,37 @@ def test_uptime_keyboard_matches_daily_stats_periods():
     assert "📈 Картинки за сутки" in texts
     assert "📈 Load avg за сутки" in texts
     assert "🗑 Очистить пинги" in texts
+    assert "С запуска" in texts
+    assert "[С запуска]" not in texts
     assert "5 мин" in texts and "всё время" in texts
+
+
+def _kb_buttons(markup) -> dict[str, str]:
+    return {button.text: button.callback_data for row in markup.inline_keyboard for button in row}
+
+
+def test_since_boot_toggle_stays_with_the_view():
+    buttons = _kb_buttons(admin_vpn_kb("7d", "a", rounded=True, since_boot=True))
+    assert [button.text for row in admin_vpn_kb("7d", "a", rounded=True, since_boot=True).inline_keyboard for button in row if button.text in {"Ноды", "Подписки", "[Доступность]", "[С запуска]"}] == [
+        "Ноды",
+        "Подписки",
+        "[Доступность]",
+        "[С запуска]",
+    ]
+    assert buttons["Ноды"] == "adv:7d:n:b"
+    assert buttons["Подписки"] == "adv:7d:s:b"
+    assert buttons["[Доступность]"] == "adv:7d:a:r:b"
+    assert buttons["[С запуска]"] == "adv:7d:a:r"
+    assert buttons["5 мин"] == "adv:5m:a:r:b"
+    assert buttons["[Округление]"] == "adv:7d:a:b"
+    assert buttons["📄 Логи за неделю"] == "advl:7d:b"
+    assert buttons["📈 Доступность за неделю"] == "advc:7d:a:r:b"
+    assert buttons["📈 Load avg за неделю"] == "adld:7d"
+    assert buttons["🗑 Очистить пинги"] == "advw:7d:a:b"
+    assert _parse_vpn_view(buttons["[Доступность]"]) == ("7d", "a", True, True)
+    assert _parse_vpn_view(buttons["[С запуска]"]) == ("7d", "a", True, False)
+    assert _parse_vpn_chart(buttons["📈 Доступность за неделю"]) == ("7d", True, True, False, True)
+    assert _kb_buttons(admin_vpn_kb())["С запуска"] == "adv:24h:n:b"
 
 
 async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
@@ -92,6 +123,10 @@ async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
     assert summary["p95_ms"] is None
     assert summary["p95_count"] == 0
     assert summary["p95_no_ping_count"] == 1
+    assert summary["p100ms"] == 40
+    assert summary["p300ms"] == 60
+    assert summary["p500ms"] == 60
+    assert summary["p1000ms"] == 60
 
     text = await _vpn_report(repo, repo.db.config, "24h", view="n")
     assert text.startswith("🛡 <b>VPN / задержка бота</b>")
@@ -109,6 +144,10 @@ async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
     assert "сервер выключен" in text
     assert "сервис не запущен" in text
     assert "p95: нет пинга (0 зам., 1 без пинга)" in html.unescape(text)
+    plain = html.unescape(text)
+    assert "p100мс" in plain and "p40" in plain
+    assert "p300мс" in plain and "p500мс" in plain and "p1000мс" in plain
+    assert "p60" in plain
     assert "p95 нет пинга (0 зам., 1 без пинга)" in text
 
     subs = await _vpn_report(repo, repo.db.config, "24h", view="s")
@@ -148,11 +187,16 @@ async def test_percentiles_keep_fast_failures_in_the_tail(repo):
     assert summary["p95_no_ping"] is False
     assert summary["p95_count"] == 20
     assert summary["p95_no_ping_count"] == 1
+    assert summary["p100ms"] == pytest.approx(100 * 20 / 21)
+    assert summary["p300ms"] == pytest.approx(100 * 20 / 21)
+    assert summary["p500ms"] == pytest.approx(100 * 20 / 21)
+    assert summary["p1000ms"] == pytest.approx(100 * 20 / 21)
     assert summary["p99_no_ping"] is True
     assert summary["p99_no_ping_count"] == 1
 
     text = html.unescape(await _vpn_report(repo, repo.db.config, "24h", view="n"))
     assert "20 зам., 1 без пинга" in text
+    assert "p95,2" in text
     assert "0 зам., 1 без пинга" in text
     assert "нет пинга" in text
     nodes = await repo.vpn_top_nodes(start, end)
@@ -160,6 +204,51 @@ async def test_percentiles_keep_fast_failures_in_the_tail(repo):
     assert nodes[0]["p95_count"] == 20
     assert nodes[0]["p95_no_ping_count"] == 1
     assert "p95 100 мс (20 зам., 1 без пинга)" in text
+
+
+async def test_px_ms_steps_up_at_each_threshold(repo):
+    now = to_iso(now_utc())
+    for latency in (50, 250, 400, 800, 1500):
+        await repo.insert_vpn_sample(now, True, latency, "n", "sub", None, 1.0)
+    await repo.insert_vpn_sample(now, False, 10, "n", "sub", "timeout", 1.0)
+    start = "2000-01-01T00:00:00+00:00"
+    end = "2999-01-01T00:00:00+00:00"
+    summary = await repo.vpn_latency_summary(start, end)
+    assert summary["p100ms"] == pytest.approx(100 * 1 / 6)
+    assert summary["p300ms"] == pytest.approx(100 * 2 / 6)
+    assert summary["p500ms"] == pytest.approx(100 * 3 / 6)
+    assert summary["p1000ms"] == pytest.approx(100 * 4 / 6)
+
+    text = html.unescape(await _vpn_report(repo, repo.db.config, "24h", view="n"))
+    assert "p100мс" in text and "p16,7" in text
+    assert "p300мс" in text and "p33,3" in text
+    assert "p500мс" in text and "p50" in text
+    assert "p1000мс" in text and "p66,7" in text
+
+
+async def test_since_boot_cuts_the_window_at_process_start(repo, monkeypatch):
+    import handlers.uptime as screen
+
+    end = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(screen, "bot_uptime_seconds", lambda: 3600)
+    await repo.insert_vpn_sample(to_iso(end - timedelta(hours=2)), True, 40, "old-node", "sub", None, 1.0)
+    await repo.insert_vpn_sample(
+        to_iso(end - timedelta(minutes=10)), False, 20, "fresh-node", "sub", "timeout", 1.0
+    )
+    full = await _vpn_report(repo, repo.db.config, "all", now=end)
+    cut = await _vpn_report(repo, repo.db.config, "all", now=end, since_boot=True)
+    assert "Замеров: 2" in full
+    assert "old-node" in full and "fresh-node" in full
+    assert "За всё время, с запуска бота" in cut
+    assert "Замеров: 1" in cut
+    assert "fresh-node" in cut
+    assert "old-node" not in cut
+    assert "ошибок: 1" in cut
+
+    monkeypatch.setattr(screen, "bot_uptime_seconds", lambda: None)
+    unknown = await _vpn_report(repo, repo.db.config, "24h", now=end, since_boot=True)
+    assert "запуск бота неизвестен" in unknown
+    assert "Замеров: 2" in unknown
 
 
 async def test_superadmin_opens_uptime_from_service(h):
@@ -196,6 +285,36 @@ async def test_superadmin_wipes_ping_samples_only(h):
     assert "Замеров: 0" in h.last_text()
     kept = await h.repo.db.load_db.list_between("2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00")
     assert any(row[0] == now and row[1:] == (0.1, 0.2, 0.3) for row in kept)
+
+
+async def test_since_boot_toggle_filters_the_open_screen(h, monkeypatch):
+    import handlers.uptime as screen
+
+    monkeypatch.setattr(screen, "bot_uptime_seconds", lambda: 30 * 60)
+    old = to_iso(now_utc() - timedelta(hours=2))
+    fresh = to_iso(now_utc())
+    await h.repo.insert_vpn_sample(old, True, 40, "old-node", "sub", None, 1.0)
+    await h.repo.insert_vpn_sample(fresh, True, 80, "fresh-node", "sub", None, 1.0)
+    await h.text(1, "/start")
+    await h.click(1, "s:srv")
+    await h.press(1, "Аптайм")
+    assert "Замеров: 2" in h.last_text()
+    assert h.buttons()["С запуска"] == "adv:24h:n:b"
+    await h.press(1, "С запуска")
+    assert "[С запуска]" in h.buttons()
+    assert "с запуска бота" in h.last_text()
+    assert "Замеров: 1" in h.last_text()
+    assert "fresh-node" in h.last_text()
+    assert "old-node" not in h.last_text()
+    await h.press(1, "всё время")
+    assert "[С запуска]" in h.buttons()
+    assert "За всё время, с запуска бота" in h.last_text()
+    assert "old-node" not in h.last_text()
+    await h.press(1, "С запуска")
+    assert "С запуска" in h.buttons()
+    assert "[С запуска]" not in h.buttons()
+    assert "с запуска бота" not in h.last_text()
+    assert "old-node" in h.last_text() and "fresh-node" in h.last_text()
 
 
 async def test_guest_cannot_open_uptime(h):

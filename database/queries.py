@@ -122,6 +122,10 @@ def _empty_vpn_summary() -> dict[str, Any]:
         "bucket_500_1000": 0,
         "bucket_1000": 0,
         "no_ping": 0,
+        "p100ms": None,
+        "p300ms": None,
+        "p500ms": None,
+        "p1000ms": None,
     }
 
 
@@ -1134,7 +1138,11 @@ class Repo:
                 COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms >= 100 AND latency_ms < 500 THEN 1 ELSE 0 END), 0) AS bucket_100_500,
                 COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms >= 500 AND latency_ms < 1000 THEN 1 ELSE 0 END), 0) AS bucket_500_1000,
                 COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms >= 1000 THEN 1 ELSE 0 END), 0) AS bucket_1000,
-                COALESCE(SUM(CASE WHEN NOT ({_VPN_OK_PING_SQL}) THEN 1 ELSE 0 END), 0) AS no_ping
+                COALESCE(SUM(CASE WHEN NOT ({_VPN_OK_PING_SQL}) THEN 1 ELSE 0 END), 0) AS no_ping,
+                COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms <= 100 THEN 1 ELSE 0 END), 0) AS within_100,
+                COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms <= 300 THEN 1 ELSE 0 END), 0) AS within_300,
+                COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms <= 500 THEN 1 ELSE 0 END), 0) AS within_500,
+                COALESCE(SUM(CASE WHEN {_VPN_OK_PING_SQL} AND latency_ms <= 1000 THEN 1 ELSE 0 END), 0) AS within_1000
             FROM vpn_latency_samples
             WHERE measured_at >= ? AND measured_at < ?
             """,
@@ -1144,6 +1152,12 @@ class Repo:
         ok_count = int(row["ok_count"]) if row else 0
         measured = int(row["measured"]) if row else 0
         no_ping = int(row["no_ping"]) if row else 0
+        # Largest x such that px is still at or under the threshold.
+        # No-ping ranks above every ping, so it stays in the denominator only.
+        px_ms = {
+            limit: (100.0 * int(row[f"within_{limit}"]) / total) if total else None
+            for limit in (100, 300, 500, 1000)
+        }
         summary = {
             "total": total,
             "ok_count": ok_count,
@@ -1157,6 +1171,10 @@ class Repo:
             "bucket_500_1000": int(row["bucket_500_1000"]) if row else 0,
             "bucket_1000": int(row["bucket_1000"]) if row else 0,
             "no_ping": no_ping,
+            "p100ms": px_ms[100],
+            "p300ms": px_ms[300],
+            "p500ms": px_ms[500],
+            "p1000ms": px_ms[1000],
         }
         ok_n = total - no_ping
         pending: list[tuple[str, int]] = []
