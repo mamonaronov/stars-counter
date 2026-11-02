@@ -217,6 +217,12 @@ async def fetch_auto_now(config: Config) -> tuple[str | None, str | None]:
     return last_now, None
 
 
+def _probe_timed_out(error: str | None) -> bool:
+    if not error:
+        return False
+    return any(part == "timeout" for part in error.split("; "))
+
+
 class VpnMonitor:
     def __init__(self, config: Config, probe_bot: Bot | None = None) -> None:
         self.config = config
@@ -225,6 +231,10 @@ class VpnMonitor:
         self._ok = 0
         self._fail = 0
         self._latencies: list[int] = []
+        self._attempt = 0
+        self._recorded_attempt = 0
+        self._open: dict | None = None
+        self._record_lock = asyncio.Lock()
 
     def _probe(self, bot: Bot) -> Bot:
         return self._probe_bot if self._probe_bot is not None else bot
@@ -235,6 +245,57 @@ class VpnMonitor:
         self._probe_bot = make_probe_bot(self.config)
         if old is not None:
             await reset_bot_session(old)
+
+    def _start_attempt(self) -> int:
+        self._attempt += 1
+        return self._attempt
+
+    async def _commit(self, attempt: int, repo: Repo, sample: dict) -> bool:
+        async with self._record_lock:
+            if attempt <= self._recorded_attempt:
+                return False
+            await repo.insert_vpn_sample(
+                sample["measured_at"],
+                sample["ok"],
+                sample["latency_ms"],
+                sample["node_name"],
+                sample["subscription"],
+                sample["error"],
+                host_uptime_seconds(),
+            )
+            self._recorded_attempt = attempt
+            self._ticks += 1
+            if sample["ok"]:
+                self._ok += 1
+                if sample["latency_ms"] is not None:
+                    self._latencies.append(sample["latency_ms"])
+            else:
+                self._fail += 1
+            self._flush_summary()
+        if _probe_timed_out(sample.get("error")):
+            waited = (sample.get("latency_ms") or 0) / 1000
+            logger.warning("VPN probe failed: no answer after %.1fs", waited)
+        return True
+
+    async def commit_timeout(self, repo: Repo, waited_s: float) -> None:
+        """Store the open attempt as a failure when the whole tick is abandoned."""
+        open_attempt = self._open
+        if not open_attempt:
+            return
+        snapshot = dict(open_attempt)
+        parts = [part for part in (snapshot.get("mihomo_error"), "timeout") if part]
+        await self._commit(
+            int(snapshot["attempt"]),
+            repo,
+            {
+                "measured_at": snapshot["measured_at"],
+                "ok": False,
+                "latency_ms": int(waited_s * 1000),
+                "node_name": snapshot.get("node_name"),
+                "subscription": snapshot.get("subscription"),
+                "error": "; ".join(parts),
+            },
+        )
 
     def _flush_summary(self) -> None:
         if self._ticks % _SUMMARY_EVERY != 0:
@@ -254,9 +315,20 @@ class VpnMonitor:
         self._latencies = []
 
     async def tick(self, bot: Bot, repo: Repo) -> dict:
+        attempt = self._start_attempt()
         measured_at = to_iso(now_utc())
+        self._open = {
+            "attempt": attempt,
+            "measured_at": measured_at,
+            "node_name": None,
+            "subscription": None,
+            "mihomo_error": None,
+        }
         node_raw, mihomo_error = await fetch_auto_now(self.config)
         node_name, subscription = parse_node(node_raw)
+        self._open["node_name"] = node_name
+        self._open["subscription"] = subscription
+        self._open["mihomo_error"] = mihomo_error
         ok, latency_ms, bot_error = await measure_bot_latency(
             self._probe(bot), self.config.vpn_monitor_timeout_seconds
         )
@@ -270,16 +342,7 @@ class VpnMonitor:
             "subscription": subscription,
             "error": error,
         }
-        await repo.insert_vpn_sample(
-            measured_at, ok, latency_ms, node_name, subscription, error, host_uptime_seconds()
-        )
-        self._ticks += 1
-        if ok:
-            self._ok += 1
-            self._latencies.append(latency_ms)
-        else:
-            self._fail += 1
-        self._flush_summary()
+        await self._commit(attempt, repo, sample)
         return sample
 
 

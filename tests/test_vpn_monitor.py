@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import VPN_DB_MAX_BYTES, load_config
 from database.vpn_database import sqlite_bundle_bytes
-from services.jobs import setup_scheduler, vpn_monitor_job_timeout
+from services.jobs import setup_scheduler, vpn_monitor_job, vpn_monitor_job_timeout
 from services.vpn_monitor import VpnMonitor, ping_status_line
 from tests.conftest import make_config
 
@@ -131,6 +132,51 @@ async def test_ping_cap_deletes_oldest_samples(repo):
     again = await repo.db.vpn_db.enforce_max_bytes(cap)
     assert again == 0
     assert sqlite_bundle_bytes(repo.db.vpn_db.path) <= cap
+
+
+async def test_probe_timeout_is_stored_immediately(repo, monkeypatch, caplog):
+    async def fake_now(config):
+        return "s3 | Cyprus | [BL]-01", None
+
+    monkeypatch.setattr("services.vpn_monitor.fetch_auto_now", fake_now)
+
+    class Slow:
+        async def get_me(self):
+            await asyncio.sleep(5)
+
+    cfg = replace(repo.db.config, vpn_monitor_timeout_seconds=0.05)
+    monitor = VpnMonitor(cfg, probe_bot=Slow())
+    with caplog.at_level(logging.WARNING):
+        sample = await monitor.tick(object(), repo)
+    assert sample["ok"] is False
+    assert sample["error"] == "timeout"
+    assert monitor._fail == 1
+    assert any("VPN probe failed: no answer after" in rec.message for rec in caplog.records)
+    stored = await repo.latest_vpn_sample()
+    assert stored is not None
+    assert stored.ok == 0
+    assert stored.error == "timeout"
+    assert await repo.count_vpn_samples() == 1
+
+
+async def test_abandoned_tick_timeout_is_stored_once(repo, monkeypatch, caplog):
+    async def hang(config):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("services.vpn_monitor.fetch_auto_now", hang)
+    monkeypatch.setattr("services.jobs.vpn_monitor_job_timeout", lambda monitor: 0.05)
+    monitor = VpnMonitor(repo.db.config)
+    with caplog.at_level(logging.WARNING):
+        await vpn_monitor_job(monitor, object(), repo)
+    await asyncio.sleep(0)
+    assert monitor._fail == 1
+    assert await repo.count_vpn_samples() == 1
+    stored = await repo.latest_vpn_sample()
+    assert stored is not None
+    assert stored.ok == 0
+    assert stored.error == "timeout"
+    assert any("VPN probe failed: no answer after" in rec.message for rec in caplog.records)
+    assert any("resetting probe session" in rec.message for rec in caplog.records)
 
 
 async def test_ping_status_line_reports_latest_sample(repo):

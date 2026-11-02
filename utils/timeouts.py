@@ -22,6 +22,13 @@ def _consume_abandoned(task: asyncio.Task[Any]) -> None:
         logger.debug("Abandoned task %s finished with %s", task.get_name(), exc)
 
 
+def _abandon(task: asyncio.Task[Any]) -> None:
+    """Cancel a leftover task and read its exception so asyncio does not keep it."""
+    if not task.done():
+        task.cancel()
+    task.add_done_callback(_consume_abandoned)
+
+
 async def await_or_abandon(awaitable: Awaitable[T], timeout: float, *, name: str = "task") -> T:
     """Wait for *awaitable*, but do not block on a hung cancel.
 
@@ -33,11 +40,14 @@ async def await_or_abandon(awaitable: Awaitable[T], timeout: float, *, name: str
         return await awaitable
     task = asyncio.ensure_future(awaitable)
     task.set_name(name)
-    done, _ = await asyncio.wait({task}, timeout=timeout)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        _abandon(task)
+        raise
     if task in done:
         return task.result()
-    task.cancel()
-    task.add_done_callback(_consume_abandoned)
+    _abandon(task)
     logger.warning("%s timed out after %.1fs and was abandoned", name, timeout)
     raise TimeoutError(f"{name} timed out after {timeout:.1f}s")
 

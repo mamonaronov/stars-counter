@@ -254,6 +254,7 @@ async def vpn_monitor_job(monitor, bot: Bot, repo: Repo) -> None:
     try:
         await await_or_abandon(monitor.tick(bot, repo), timeout, name="vpn_monitor_job")
     except TimeoutError:
+        await monitor.commit_timeout(repo, timeout)
         logger.warning("VPN monitor tick timed out after %.0fs, resetting probe session", timeout)
         await monitor.reset_probe()
     except Exception:
