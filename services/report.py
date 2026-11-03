@@ -14,6 +14,7 @@ pastel scale and is not listed in the color key.
 from __future__ import annotations
 
 import re
+import zipfile
 from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
@@ -151,10 +152,84 @@ def build_periods_xlsx(*, org_title: str, sections: list[PeriodSection]) -> byte
     return _save(wb)
 
 
+_XF_OPENING = re.compile(r"<xf\b[^>]*>")
+_NUM_FMT_ID = re.compile(r'\bnumFmtId="(\d+)"')
+
+
 def _save(wb: Workbook) -> bytes:
+    # iPhone Excel does not recalculate. An empty cached result is shown as 0,
+    # so every formula below is stored with the value it already has.
+    wb.calculation.fullCalcOnLoad = False
+    wb.calculation.calcCompleted = True
+    caches = [dict(getattr(ws, "formula_cache", {})) for ws in wb.worksheets]
     buffer = BytesIO()
     wb.save(buffer)
-    return buffer.getvalue()
+    return _patch_workbook(buffer.getvalue(), caches)
+
+
+_CELL = re.compile(r'<c r="([A-Z]+[0-9]+)"[^>]*>(?:(?!</c>).)*</c>', re.DOTALL)
+_EMPTY_VALUE = ("<v />", "<v/>", "<v></v>")
+
+
+def _patch_workbook(data: bytes, caches: list[dict[str, int | float]]) -> bytes:
+    """Make the journal readable in Excel and Numbers on iPhone.
+
+    openpyxl stores a percent format without ``applyNumberFormat``, and writes
+    formulas with an empty cached result. Desktop Excel fills both in. iPhone
+    keeps the general format and shows the empty result as 0, so a student who
+    attended reads as 0%.
+    """
+    src = zipfile.ZipFile(BytesIO(data))
+    styles = _XF_OPENING.sub(_apply_number_format_flag, src.read("xl/styles.xml").decode())
+    sheets = {
+        f"xl/worksheets/sheet{index}.xml": _fill_formula_cache(src.read(name).decode(), cache)
+        for index, cache in enumerate(caches, start=1)
+        if cache
+        for name in (f"xl/worksheets/sheet{index}.xml",)
+    }
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w") as dest:
+        for item in src.infolist():
+            if item.filename == "xl/styles.xml":
+                payload = styles.encode()
+            elif item.filename in sheets:
+                payload = sheets[item.filename].encode()
+            else:
+                payload = src.read(item.filename)
+            dest.writestr(item, payload)
+    return out.getvalue()
+
+
+def _fill_formula_cache(xml: str, cache: dict[str, int | float]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        value = cache.get(match.group(1))
+        if value is None:
+            return match.group(0)
+        body = match.group(0)
+        cached = f"<v>{_excel_number(value)}</v>"
+        for empty in _EMPTY_VALUE:
+            if empty in body:
+                return body.replace(empty, cached, 1)
+        return body
+
+    return _CELL.sub(replace, xml)
+
+
+def _excel_number(value: int | float) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = format(float(value), ".12f").rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _apply_number_format_flag(match: re.Match[str]) -> str:
+    tag = match.group(0)
+    fmt = _NUM_FMT_ID.search(tag)
+    if fmt is None or fmt.group(1) == "0" or "applyNumberFormat=" in tag:
+        return tag
+    if tag.endswith("/>"):
+        return tag[:-2].rstrip() + ' applyNumberFormat="1"/>'
+    return tag[:-1].rstrip() + ' applyNumberFormat="1">'
 
 
 def _sheet_name(raw: str, used: set[str]) -> str:
@@ -243,7 +318,6 @@ def _write_journal(
     for group in groups:
         start = col
         day_free = all(event.is_free for event in group)
-        width = 12.63 if len(group) == 1 else 6.63
         for event in group:
             day_free_by_id[event.id] = day_free
             fill = _FREE_FILL if day_free else None
@@ -264,7 +338,6 @@ def _write_journal(
                 fill=fill,
                 border=True,
             )
-            ws.column_dimensions[get_column_letter(col)].width = width
             col += 1
         end = col - 1
         header_fill = _FREE_FILL if day_free else None
@@ -301,14 +374,15 @@ def _write_journal(
         first_letter = get_column_letter(_FIRST_EVENT_COL)
         last_letter = get_column_letter(last_event_col)
         _put(ws.cell(row=_HEADER_ROW, column=weight_col), None, border=True)
+        weight_cell = ws.cell(row=_WEIGHT_ROW, column=weight_col)
         _put(
-            ws.cell(row=_WEIGHT_ROW, column=weight_col),
+            weight_cell,
             f"=SUM({first_letter}{_WEIGHT_ROW}:{last_letter}{_WEIGHT_ROW})",
             bold=True,
             align=_CENTER,
             border=True,
         )
-        ws.column_dimensions[get_column_letter(weight_col)].width = 7.88
+        _remember(ws, weight_cell, sum(not event.is_free for event in events))
 
     ordered = sorted(stats, key=lambda item: item.student.full_name.casefold())
     as_of = period_to or period_from
@@ -318,13 +392,18 @@ def _write_journal(
         bounds = _counted_bounds(item.student, events)
         _put(ws.cell(row=row, column=1), _course_number(item.student.enrollment_year, as_of), align=_CENTER, border=True)
         _put(ws.cell(row=row, column=2), item.student.full_name, border=True)
-        _put(ws.cell(row=row, column=4), _count_formula(row, events, bounds), border=True)
-        _put(
-            ws.cell(row=row, column=3),
-            _percent_formula(row, item.mandatory_total, events, bounds, weight_ref),
-            fmt="0%",
-            border=True,
-        )
+        count_cell = ws.cell(row=row, column=4)
+        count_value = _count_formula(row, events, bounds)
+        _put(count_cell, count_value, border=True)
+        percent_cell = ws.cell(row=row, column=3)
+        percent_value = _percent_formula(row, item.mandatory_total, events, bounds, weight_ref)
+        _put(percent_cell, percent_value, fmt="0%", border=True)
+        if bounds is not None:
+            visits, weight = _counted_totals(item, events, bounds)
+            if isinstance(count_value, str):
+                _remember(ws, count_cell, visits)
+            if isinstance(percent_value, str) and weight:
+                _remember(ws, percent_cell, visits / weight)
         _put(ws.cell(row=row, column=5), item.student.direction, border=True)
         _put(
             ws.cell(row=row, column=6),
@@ -368,14 +447,7 @@ def _write_journal(
             )
 
     ws.row_dimensions[_HEADER_ROW].height = 120
-    ws.column_dimensions["A"].width = 4.88
-    ws.column_dimensions["B"].width = 29.13
-    ws.column_dimensions["C"].width = 7.63
-    ws.column_dimensions["D"].width = 4.88
-    ws.column_dimensions["E"].width = 5.5
-    ws.column_dimensions["F"].width = 4.63
-    ws.column_dimensions["G"].width = 11.63
-    ws.column_dimensions["H"].width = 21.13
+    _fit_columns(ws)
     ws.auto_filter.ref = f"A{_WEIGHT_ROW}:{get_column_letter(last_event_col)}{filter_end}"
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
@@ -387,6 +459,98 @@ def _write_journal(
     ws.page_margins.right = 0.25
     ws.page_margins.top = 0.75
     ws.page_margins.bottom = 0.75
+
+
+# Arial 10 at 96 dpi, in pixels. The width unit is a digit of the workbook font.
+_PX_DIGIT = 7.3
+_PX_LOWER = 7.4
+_PX_UPPER = 9.6
+_PX_PERCENT = 11.5
+_PX_NARROW = 4.0
+_PX_PAD = 10
+_WIDTH_UNIT = 7
+_ROTATED_COLUMN_WIDTH = 4.0
+
+
+def _fit_columns(ws: Worksheet) -> None:
+    """Size each column to the text Excel will actually draw.
+
+    A vertical header stays in the tall header row, so its length does not
+    widen the column. A caption merged across a day is shared by those
+    columns. The corner notes on rows 1–2 spill sideways on purpose.
+    """
+    spans = [rng for rng in ws.merged_cells.ranges if rng.max_col > rng.min_col]
+    span_anchor = {(rng.min_row, rng.min_col) for rng in spans}
+    needed: dict[int, float] = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is None:
+                continue
+            if _is_rotated(cell):
+                needed[cell.column] = max(needed.get(cell.column, 0), _ROTATED_COLUMN_WIDTH)
+                continue
+            if cell.row <= 2 and cell.column < _FIRST_EVENT_COL:
+                continue
+            if (cell.row, cell.column) in span_anchor:
+                continue
+            text = _shown_text(ws, cell)
+            if not text:
+                continue
+            needed[cell.column] = max(needed.get(cell.column, 0), _text_width(text, bold=bool(cell.font.bold)))
+    for column, width in needed.items():
+        ws.column_dimensions[get_column_letter(column)].width = width
+    for rng in spans:
+        cell = ws.cell(rng.min_row, rng.min_col)
+        text = _shown_text(ws, cell)
+        if not text or _is_rotated(cell):
+            continue
+        required = _text_width(text, bold=bool(cell.font.bold))
+        columns = range(rng.min_col, rng.max_col + 1)
+        total = sum(needed.get(column, 0) for column in columns)
+        if total >= required:
+            continue
+        share = (required - total) / len(columns)
+        for column in columns:
+            needed[column] = round(needed.get(column, 0) + share, 2)
+            ws.column_dimensions[get_column_letter(column)].width = needed[column]
+
+
+def _is_rotated(cell) -> bool:
+    return bool(cell.alignment is not None and cell.alignment.textRotation)
+
+
+def _shown_text(ws: Worksheet, cell) -> str:
+    value = cell.value
+    if isinstance(value, str) and value.startswith("="):
+        value = getattr(ws, "formula_cache", {}).get(cell.coordinate)
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (int, float)) and cell.number_format == "0%":
+        return f"{round(float(value) * 100):.0f}%"
+    if isinstance(value, (int, float)) and cell.number_format == "0.00%":
+        return f"{float(value) * 100:.2f}%"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _text_width(text: str, *, bold: bool) -> float:
+    pixels = sum(_char_px(char) for char in text)
+    if bold:
+        pixels *= 1.1
+    return round((pixels + _PX_PAD) / _WIDTH_UNIT, 2)
+
+
+def _char_px(char: str) -> float:
+    if char == "%":
+        return _PX_PERCENT
+    if char.isdigit():
+        return _PX_DIGIT
+    if char.isupper():
+        return _PX_UPPER
+    if char in " .,":
+        return _PX_NARROW
+    return _PX_LOWER
 
 
 def _counted_bounds(student, events: list[Event]) -> tuple[int, int] | None:
@@ -422,6 +586,36 @@ def _percent_formula(
     return f"=D{row}/SUM(${first}${_WEIGHT_ROW}:${last}${_WEIGHT_ROW})"
 
 
+def _counted_totals(item: StudentStats, events: list[Event], bounds: tuple[int, int]) -> tuple[int, int]:
+    start, end = bounds
+    by_event = {record.event.id: record for record in item.rows}
+    visits = 0
+    weight = 0
+    for event in events[start : end + 1]:
+        if _mark(by_event.get(event.id)) == 1:
+            visits += 1
+        if not event.is_free:
+            weight += 1
+    return visits, weight
+
+
+def _lesson_visits(stats: list[StudentStats], event: Event) -> int:
+    total = 0
+    for item in stats:
+        record = next((row for row in item.rows if row.event.id == event.id), None)
+        if _mark(record) == 1:
+            total += 1
+    return total
+
+
+def _remember(ws: Worksheet, cell, value: int | float) -> None:
+    cache = getattr(ws, "formula_cache", None)
+    if cache is None:
+        cache = {}
+        ws.formula_cache = cache
+    cache[cell.coordinate] = value
+
+
 def _mark(record: EventRow | None) -> int | None:
     if record is None:
         return None
@@ -451,40 +645,47 @@ def _write_totals(
     sum_row = last_student_row + 2
     count = len(stats)
     _write_legend(ws, percent_row)
+    _put(ws.cell(row=percent_row, column=8), "% посещения занятия")
+    _put(ws.cell(row=sum_row, column=8), "человек пришло")
     for index, event in enumerate(events):
         column = _FIRST_EVENT_COL + index
         letter = get_column_letter(column)
         fill = _FREE_FILL if day_free_by_id.get(event.id) else None
+        visits = _lesson_visits(stats, event)
+        sum_cell = ws.cell(row=sum_row, column=column)
         _put(
-            ws.cell(row=sum_row, column=column),
+            sum_cell,
             f"=SUM({letter}{_FIRST_STUDENT_ROW}:{letter}{last_student_row})",
             align=_CENTER,
             fill=fill,
             border=True,
         )
+        _remember(ws, sum_cell, visits)
+        percent_cell = ws.cell(row=percent_row, column=column)
         _put(
-            ws.cell(row=percent_row, column=column),
+            percent_cell,
             f"={letter}{sum_row}/{count}",
             align=_CENTER,
             fmt="0.00%",
             fill=fill,
             border=True,
         )
+        _remember(ws, percent_cell, visits / count)
 
 
 def _write_legend(ws: Worksheet, start_row: int) -> None:
-    """Color key in F:H, from the summary rows downward, as in the class register."""
+    """Color key in A:C, from the summary rows downward, as in the class register."""
     last = len(_LEGEND) - 1
     for index, (fill, text) in enumerate(_LEGEND):
         row = start_row + index
         top = _THICK if index == 0 else None
         bottom = _THICK if index == last else None
-        swatch = ws.cell(row=row, column=6)
+        swatch = ws.cell(row=row, column=1)
         _put(swatch, None, bold=index == 0, fill=fill)
         swatch.border = Border(left=_THICK, top=top, bottom=bottom)
-        label = ws.cell(row=row, column=7)
+        label = ws.cell(row=row, column=2)
         _put(label, text)
         label.border = Border(top=top, bottom=bottom)
-        edge = ws.cell(row=row, column=8)
+        edge = ws.cell(row=row, column=3)
         _put(edge, None)
         edge.border = Border(top=top, right=_THICK, bottom=bottom)
