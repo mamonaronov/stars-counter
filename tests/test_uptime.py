@@ -61,6 +61,8 @@ def test_uptime_keyboard_matches_daily_stats_periods():
     assert "📈 Картинки за сутки" in texts
     assert "📈 Load avg за сутки" in texts
     assert "🗑 Очистить пинги" in texts
+    assert "🛠 Сервис" in texts
+    assert "🏠 Меню" in texts
     assert "С запуска" in texts
     assert "[С запуска]" not in texts
     assert "5 мин" in texts and "всё время" in texts
@@ -88,6 +90,7 @@ def test_since_boot_toggle_stays_with_the_view():
     assert buttons["📈 Доступность за неделю"] == "advc:7d:a:r:b"
     assert buttons["📈 Load avg за неделю"] == "adld:7d"
     assert buttons["🗑 Очистить пинги"] == "advw:7d:a:b"
+    assert buttons["🏠 Меню"] == "n:m"
     assert _parse_vpn_view(buttons["[Доступность]"]) == ("7d", "a", True, True)
     assert _parse_vpn_view(buttons["[С запуска]"]) == ("7d", "a", True, False)
     assert _parse_vpn_chart(buttons["📈 Доступность за неделю"]) == ("7d", True, True, False, True)
@@ -265,6 +268,10 @@ async def test_superadmin_opens_uptime_from_service(h):
     assert "[Подписки]" in h.buttons()
     await h.press(1, "Сервис")
     assert "🛠" in h.last_text() or "Сервис" in h.last_text()
+    await h.press(1, "Аптайм")
+    await h.press(1, "Меню")
+    assert "Посещаемость" in h.last_text()
+    assert "🛠 Сервис" in h.buttons()
 
 
 async def test_superadmin_wipes_ping_samples_only(h):

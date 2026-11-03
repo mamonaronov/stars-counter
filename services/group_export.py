@@ -123,7 +123,7 @@ def attendance_fingerprint(
                     str(excuse.student_id),
                     excuse.kind,
                     excuse.date_from,
-                    excuse.date_to,
+                    excuse.date_to or "",
                 )
             )
         )

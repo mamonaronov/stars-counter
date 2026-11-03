@@ -430,12 +430,89 @@ async def test_card_closer_moves_existing_boundary(h: Harness):
     assert (await h.repo.get_event(second.id)).closes_month == 0
 
 
+async def test_open_sick_leave_covers_until_it_is_closed(h: Harness):
+    from services.stats import STATUS_ABSENT, STATUS_EXCUSED, compute_student_stats
+
+    student = await h.repo.create_student("Больной Борис", 2023, "2026-09-01", SUPER)
+    await h.repo.create_event("До", "mandatory", "2026-09-01", None, None, SUPER)
+    await h.repo.create_event("Во время", "mandatory", "2026-09-10", None, None, SUPER)
+    await h.repo.create_event("После", "mandatory", "2026-09-20", None, None, SUPER)
+
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, "s:exc")
+    await h.press(SUPER, "➕ Добавить")
+    await h.press(SUPER, "Больной")
+    await h.press(SUPER, "Отпрос")
+    await h.text(SUPER, "05.09.2026")
+    assert "Открытый" not in h.buttons()
+
+    await h.click(SUPER, "s:exc")
+    await h.press(SUPER, "➕ Добавить")
+    await h.press(SUPER, "Больной")
+    await h.press(SUPER, "Больничный")
+    await h.text(SUPER, "05.09.2026")
+    assert "Открытый" in h.buttons()
+    await h.press(SUPER, "Открытый")
+    await h.press(SUPER, "Без комментария")
+    assert "с 05.09.2026, открыт" in h.last_text()
+
+    events = await h.repo.list_events()
+    excuses = await h.repo.list_excuses(student_id=student.id)
+    stats = compute_student_stats(student, events, set(), excuses)
+    assert [row.status for row in stats.rows] == [STATUS_ABSENT, STATUS_EXCUSED, STATUS_EXCUSED]
+
+    await h.press(SUPER, "Закрыть")
+    await h.text(SUPER, "01.09.2026")
+    assert "раньше даты начала" in h.last_text()
+    await h.text(SUPER, "12.09.2026")
+    assert "05.09.2026 — 12.09.2026" in h.last_text()
+    assert "открыт" not in h.last_text().lower()
+
+    closed = await h.repo.list_excuses(student_id=student.id)
+    stats = compute_student_stats(student, events, set(), closed)
+    assert [row.status for row in stats.rows] == [STATUS_ABSENT, STATUS_EXCUSED, STATUS_ABSENT]
+    actions = [entry.action for entry in await h.repo.list_audit(limit=10)]
+    assert "excuse.add" in actions and "excuse.close" in actions
+
+
+async def test_open_and_closed_sick_leaves_are_listed_apart(h: Harness):
+    sick = await h.repo.create_student("Больной Борис", 2023, "2026-09-01", SUPER)
+    away = await h.repo.create_student("Отпросный Олег", 2023, "2026-09-01", SUPER)
+    await h.repo.create_excuse(sick.id, "sick", "2026-09-01", None, None, SUPER)
+    await h.repo.create_excuse(sick.id, "sick", "2026-08-01", "2026-08-05", None, SUPER)
+    await h.repo.create_excuse(away.id, "leave", "2026-09-02", "2026-09-02", None, SUPER)
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, "s:exc")
+    assert any(text.startswith("[Открытые") for text in h.buttons())
+    open_rows = [text for text in h.buttons() if text.startswith("🤒")]
+    assert len(open_rows) == 1 and "открыт" in open_rows[0]
+    assert not any(text.startswith("📝") for text in h.buttons())
+
+    await h.press(SUPER, "Закрытые")
+    assert any(text.startswith("[Закрытые") for text in h.buttons())
+    closed_rows = [text for text in h.buttons() if text.startswith("🤒")]
+    assert len(closed_rows) == 1 and "01.08.2026" in closed_rows[0]
+    assert "открыт" not in closed_rows[0]
+
+    await h.press(SUPER, "Больной")
+    assert "01.08.2026 — 05.08.2026" in h.last_text()
+    await h.press(SUPER, "Назад")
+    assert any(text.startswith("[Закрытые") for text in h.buttons())
+    assert any("01.08.2026" in text for text in h.buttons())
+
+    await h.press(SUPER, "Отпросы")
+    leaves = [text for text in h.buttons() if text.startswith("📝")]
+    assert len(leaves) == 1 and "Олег" in leaves[0]
+    assert not any(text.startswith("🤒") for text in h.buttons())
+
+
 async def test_excuse_list_is_paged(h: Harness):
     student = await h.repo.create_student("Больной Борис", 2023, "2026-09-01", SUPER)
     for day in range(1, 10):
         await h.repo.create_excuse(student.id, "sick", f"2026-09-{day:02d}", f"2026-09-{day:02d}", None, SUPER)
     await h.text(SUPER, "/start")
     await h.click(SUPER, "s:exc")
+    await h.press(SUPER, "Закрытые")
     assert "1/2" in h.buttons()
     first_page = [text for text in h.buttons() if text.startswith("🤒")]
     await h.press(SUPER, "»")

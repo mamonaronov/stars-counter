@@ -790,10 +790,12 @@ class Repo:
         student_id: int,
         kind: str,
         date_from: str,
-        date_to: str,
+        date_to: str | None,
         comment: str | None,
         created_by: int,
     ) -> Excuse:
+        if date_to is None and kind != "sick":
+            raise ValueError("only a sick leave can stay open")
         new_id = await self._execute(
             """
             INSERT INTO excuses (student_id, kind, date_from, date_to, comment, created_by, created_at)
@@ -827,6 +829,20 @@ class Repo:
             "UPDATE excuses SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND cancelled_at IS NULL",
             (to_iso(now_utc()), cancelled_by, excuse_id),
         )
+
+    async def close_excuse(self, excuse_id: int, date_to: str) -> Excuse | None:
+        """Set the end date of an open sick leave. None when it is not open."""
+        written = await self._write(
+            """
+            UPDATE excuses
+            SET date_to = ?
+            WHERE id = ? AND kind = 'sick' AND date_to IS NULL AND cancelled_at IS NULL
+            """,
+            (date_to, excuse_id),
+        )
+        if written.rowcount != 1:
+            return None
+        return await self.get_excuse(excuse_id)
 
     # --------------------------------------------------------------- requests
 

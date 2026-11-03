@@ -145,7 +145,7 @@ class Excuse:
     student_id: int
     kind: str
     date_from: str
-    date_to: str
+    date_to: str | None
     comment: str | None
     created_by: int
     created_at: str
@@ -156,8 +156,17 @@ class Excuse:
     def is_active(self) -> bool:
         return self.cancelled_at is None
 
+    @property
+    def is_open(self) -> bool:
+        """Sick leave with no end date yet. Covers every day from the start onward."""
+        return self.date_to is None
+
     def covers(self, day: date) -> bool:
-        return self.is_active and date.fromisoformat(self.date_from) <= day <= date.fromisoformat(self.date_to)
+        if not self.is_active or day < date.fromisoformat(self.date_from):
+            return False
+        if self.date_to is None:
+            return True
+        return day <= date.fromisoformat(self.date_to)
 
 
 @dataclass(slots=True)

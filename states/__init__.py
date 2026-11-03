@@ -44,6 +44,7 @@ class ExcuseSG(StatesGroup):
     date_from = State()
     date_to = State()
     comment = State()
+    close_on = State()
 
 
 class RequestSG(StatesGroup):

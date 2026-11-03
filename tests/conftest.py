@@ -96,7 +96,7 @@ def event(eid: int, day: str, *, kind: str = "mandatory", closes: bool = False, 
     )
 
 
-def excuse(student_id: int, date_from: str, date_to: str, *, kind: str = "sick", cancelled: bool = False) -> Excuse:
+def excuse(student_id: int, date_from: str, date_to: str | None, *, kind: str = "sick", cancelled: bool = False) -> Excuse:
     return Excuse(
         id=1,
         student_id=student_id,

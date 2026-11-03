@@ -43,6 +43,22 @@ def test_excuse_counts_missed_mandatory_as_attended():
     assert stats.percent == round(2 / 3 * 100, 2)
 
 
+def test_open_excuse_covers_every_later_mandatory_event():
+    s = student()
+    events = [event(1, "2026-09-01"), event(2, "2026-09-05"), event(3, "2026-09-10")]
+    stats = compute_student_stats(s, events, set(), [excuse(1, "2026-09-04", None)])
+    assert [row.status for row in stats.rows] == [STATUS_ABSENT, STATUS_EXCUSED, STATUS_EXCUSED]
+    assert stats.percent == round(2 / 3 * 100, 2)
+
+
+def test_cancelled_open_excuse_is_ignored():
+    s = student()
+    events = [event(1, "2026-09-05")]
+    stats = compute_student_stats(s, events, set(), [excuse(1, "2026-09-01", None, cancelled=True)])
+    assert stats.excused == 0
+    assert stats.percent == 0.0
+
+
 def test_cancelled_excuse_is_ignored():
     s = student()
     events = [event(1, "2026-09-05")]

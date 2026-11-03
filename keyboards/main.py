@@ -387,7 +387,7 @@ def admin_vpn_kb(
         b.row(btn(f"📈 Картинки за {span}", f"advc:{period}{chart_view}{boot}"))
     b.row(btn(f"📈 Load avg за {span}", f"adld:{period}"))
     b.row(btn("🗑 Очистить пинги", _vpn_callback("advw", period, view, since_boot=since_boot)))
-    b.row(btn("🛠 Сервис", SEC_SERVICE))
+    b.row(btn("🛠 Сервис", SEC_SERVICE), btn("🏠 Меню", NAV_MAIN))
     return b.as_markup()
 
 

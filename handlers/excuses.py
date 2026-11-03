@@ -1,4 +1,7 @@
-"""Sick leaves and approved absences: missed mandatory events in the range count as attended."""
+"""Sick leaves and approved absences: missed mandatory events in the range count as attended.
+
+An open sick leave has no end date and covers every day from its start until it is closed.
+"""
 
 from __future__ import annotations
 
@@ -30,33 +33,79 @@ KIND_ICON = {"sick": "🤒", "leave": "📝"}
 
 def _range(excuse: Excuse) -> str:
     start = date.fromisoformat(excuse.date_from).strftime("%d.%m.%Y")
+    if excuse.date_to is None:
+        return f"с {start}, открыт"
     end = date.fromisoformat(excuse.date_to).strftime("%d.%m.%Y")
     return start if start == end else f"{start} — {end}"
 
 
 EXCUSE_PAGE = 8
 
+EXCUSE_VIEWS = ("open", "closed", "leave")
+_VIEW_LABEL = {"open": "Открытые", "closed": "Закрытые", "leave": "Отпросы"}
+_VIEW_HINT = {
+    "open": "Открытый больничный действует с даты начала, пока его не закроют.",
+    "closed": "Закрытый больничный покрывает только дни внутри указанных дат.",
+    "leave": "Пропуски обязательных занятий за период отпроса считаются посещёнными.",
+}
+_VIEW_EMPTY = {
+    "open": "Открытых больничных нет.",
+    "closed": "Закрытых больничных нет.",
+    "leave": "Отпросов нет.",
+}
 
-async def show_excuses(target: CallbackQuery | Message, repo: Repo, page: int = 0) -> None:
+
+def _excuse_view(excuse: Excuse) -> str:
+    if excuse.kind == "leave":
+        return "leave"
+    return "open" if excuse.is_open else "closed"
+
+
+def _tab(text: str, on: bool) -> str:
+    return f"[{text}]" if on else text
+
+
+async def show_excuses(target: CallbackQuery | Message, repo: Repo, page: int = 0, *, view: str = "open") -> None:
+    if view not in EXCUSE_VIEWS:
+        view = "open"
     items = await repo.list_excuses(active_only=True)
-    pages = max(1, (len(items) + EXCUSE_PAGE - 1) // EXCUSE_PAGE)
+    grouped = {name: [excuse for excuse in items if _excuse_view(excuse) == name] for name in EXCUSE_VIEWS}
+    current = grouped[view]
+    pages = max(1, (len(current) + EXCUSE_PAGE - 1) // EXCUSE_PAGE)
     page = max(0, min(page, pages - 1))
     b = InlineKeyboardBuilder()
-    for excuse in items[page * EXCUSE_PAGE : (page + 1) * EXCUSE_PAGE]:
+    b.row(
+        btn(_tab(f"Открытые ({len(grouped['open'])})", view == "open"), "excv:open"),
+        btn(_tab(f"Закрытые ({len(grouped['closed'])})", view == "closed"), "excv:closed"),
+    )
+    b.row(btn(_tab(f"Отпросы ({len(grouped['leave'])})", view == "leave"), "excv:leave"))
+    for excuse in current[page * EXCUSE_PAGE : (page + 1) * EXCUSE_PAGE]:
         student = await repo.get_student(excuse.student_id)
         name = truncate(student.full_name, 28) if student else "?"
         b.row(btn(f"{KIND_ICON.get(excuse.kind, '•')} {name} · {_range(excuse)}", f"exc:{excuse.id}"))
     if pages > 1:
-        b.row(*pager_row("excp", page, pages))
+        b.row(*pager_row(f"excp:{view}", page, pages))
     b.row(btn("➕ Добавить", "exca"))
     b.row(*nav_row())
     text = (
         "🩺 <b>Больничные и отпросы</b>\n\n"
-        "Пропуски обязательных занятий в указанный период считаются посещёнными."
+        f"<b>{_VIEW_LABEL[view]}</b>\n"
+        f"{_VIEW_HINT[view]}"
     )
-    if not items:
-        text += "\n\nАктивных записей нет."
+    if not current:
+        text += f"\n\n{_VIEW_EMPTY[view]}"
     await respond(target, text, b.as_markup())
+
+
+def _parse_excuse_list(data: str) -> tuple[str, int]:
+    parts = data.split(":")
+    if len(parts) >= 3 and parts[1] in EXCUSE_VIEWS and parts[2].isdigit():
+        return parts[1], int(parts[2])
+    if len(parts) >= 2 and parts[1] in EXCUSE_VIEWS:
+        return parts[1], 0
+    if len(parts) >= 2 and parts[1].isdigit():
+        return "open", int(parts[1])
+    return "open", 0
 
 
 @router.callback_query(F.data == SEC_EXCUSES)
@@ -67,11 +116,21 @@ async def open_excuses(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: 
     await show_excuses(cb, repo, 0)
 
 
+@router.callback_query(F.data.startswith("excv:"))
+async def excuses_view(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    await state.clear()
+    view, page = _parse_excuse_list(cb.data)
+    await show_excuses(cb, repo, page, view=view)
+
+
 @router.callback_query(F.data.startswith("excp:"))
 async def excuses_page(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor):
         return
-    await show_excuses(cb, repo, int(cb.data.split(":", 1)[1]))
+    view, page = _parse_excuse_list(cb.data)
+    await show_excuses(cb, repo, page, view=view)
 
 
 @router.callback_query(F.data == "exca")
@@ -111,12 +170,19 @@ async def add_excuse_kind(cb: CallbackQuery, state: FSMContext, config: Config) 
 
 
 async def _ask_date_to(target: CallbackQuery | Message, state: FSMContext, day: date) -> None:
+    data = await state.get_data()
     await state.update_data(exc_from=day.isoformat())
     await state.set_state(ExcuseSG.date_to)
+    sick = data.get("exc_kind") == "sick"
     b = InlineKeyboardBuilder()
     b.row(btn("Только этот день", f"exdt:{day.isoformat()}"))
+    if sick:
+        b.row(btn("Открытый", "exopen"))
     b.row(*nav_row(SEC_EXCUSES))
-    await respond(target, f"С {day.strftime('%d.%m.%Y')}.\n\nПо какую дату (включительно)?", b.as_markup())
+    text = f"С {day.strftime('%d.%m.%Y')}.\n\nПо какую дату (включительно)?"
+    if sick:
+        text += " «Открытый» — пока без даты окончания, её можно указать позже."
+    await respond(target, text, b.as_markup())
 
 
 @router.callback_query(ExcuseSG.date_from, F.data.startswith("exdf:"))
@@ -134,18 +200,31 @@ async def add_excuse_from_text(message: Message, state: FSMContext, config: Conf
     await _ask_date_to(message, state, day)
 
 
-async def _ask_comment(target: CallbackQuery | Message, state: FSMContext, day_to: date) -> None:
+async def _ask_comment(target: CallbackQuery | Message, state: FSMContext, day_to: date | None) -> None:
     data = await state.get_data()
     day_from = date.fromisoformat(data["exc_from"])
-    if day_to < day_from:
+    if day_to is not None and day_to < day_from:
         await respond(target, "Дата окончания раньше даты начала. Введите дату окончания ещё раз.", cancel_kb(SEC_EXCUSES))
         return
-    await state.update_data(exc_to=day_to.isoformat())
+    if day_to is None and data.get("exc_kind") != "sick":
+        await respond(target, "У отпроса нужна дата окончания.", cancel_kb(SEC_EXCUSES))
+        return
+    # Empty string survives FSM storage; NULL in the database means the sick leave is still open.
+    await state.update_data(exc_to="" if day_to is None else day_to.isoformat())
     await state.set_state(ExcuseSG.comment)
     b = InlineKeyboardBuilder()
     b.row(btn("Без комментария", "exnc"))
     b.row(*nav_row(SEC_EXCUSES))
-    await respond(target, f"{day_from.strftime('%d.%m.%Y')} — {day_to.strftime('%d.%m.%Y')}.\n\nКомментарий (номер справки, причина)?", b.as_markup())
+    if day_to is None:
+        period = f"С {day_from.strftime('%d.%m.%Y')}, открытый"
+    else:
+        period = f"{day_from.strftime('%d.%m.%Y')} — {day_to.strftime('%d.%m.%Y')}"
+    await respond(target, f"{period}.\n\nКомментарий (номер справки, причина)?", b.as_markup())
+
+
+@router.callback_query(ExcuseSG.date_to, F.data == "exopen")
+async def add_excuse_open(cb: CallbackQuery, state: FSMContext) -> None:
+    await _ask_comment(cb, state, None)
 
 
 @router.callback_query(ExcuseSG.date_to, F.data.startswith("exdt:"))
@@ -169,7 +248,8 @@ async def _create(target: CallbackQuery | Message, state: FSMContext, repo: Repo
         return
     data = await state.get_data()
     await state.clear()
-    excuse = await repo.create_excuse(int(data["exc_student_id"]), data["exc_kind"], data["exc_from"], data["exc_to"], comment, actor.telegram_id)
+    date_to = data.get("exc_to") or None
+    excuse = await repo.create_excuse(int(data["exc_student_id"]), data["exc_kind"], data["exc_from"], date_to, comment, actor.telegram_id)
     await audit(
         repo,
         actor,
@@ -213,9 +293,11 @@ async def show_excuse_card(target: CallbackQuery | Message, repo: Repo, config: 
     if excuse.cancelled_at:
         lines.append(f"<b>Отменён</b> {format_dt_iso(excuse.cancelled_at, config.timezone)}")
     b = InlineKeyboardBuilder()
+    if excuse.is_active and excuse.is_open:
+        b.row(btn("📅 Закрыть", f"exclose:{excuse.id}"))
     if excuse.is_active:
         b.row(btn("❌ Отменить", f"excc:{excuse.id}"))
-    b.row(*nav_row(SEC_EXCUSES))
+    b.row(*nav_row(f"excv:{_excuse_view(excuse)}"))
     await respond(target, "\n".join(lines), b.as_markup(), notice=notice)
 
 
@@ -251,3 +333,82 @@ async def cancel_excuse(cb: CallbackQuery, repo: Repo, config: Config, actor: Ac
     await repo.cancel_excuse(excuse.id, actor.telegram_id)
     await audit(repo, actor, "excuse.cancel", entity_type="excuse", entity_id=excuse.id, студент=student.full_name if student else None, вид=EXCUSE_TITLES.get(excuse.kind), период=_range(excuse))
     await show_excuse_card(cb, repo, config, excuse.id, notice="Отменено")
+
+
+def _close_keyboard(excuse_id: int, today: date):
+    b = InlineKeyboardBuilder()
+    b.row(btn("Сегодня", f"excdt:{today.isoformat()}"))
+    b.row(*nav_row(f"exc:{excuse_id}"))
+    return b.as_markup()
+
+
+async def _close_excuse(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor | None, day: date) -> None:
+    if not await require_level(target, actor):
+        await state.clear()
+        return
+    assert actor is not None
+    data = await state.get_data()
+    excuse_id = int(data["exc_close_id"])
+    start = date.fromisoformat(data["exc_from"])
+    if day < start:
+        await respond(
+            target,
+            "Дата окончания раньше даты начала. Введите дату ещё раз.",
+            _close_keyboard(excuse_id, local_today(config.timezone)),
+        )
+        return
+    closed = await repo.close_excuse(excuse_id, day.isoformat())
+    await state.clear()
+    if closed is None:
+        if isinstance(target, CallbackQuery):
+            await answer_callback(target, "Больничный уже закрыт или отменён", show_alert=True)
+        await show_excuse_card(target, repo, config, excuse_id)
+        return
+    student = await repo.get_student(closed.student_id)
+    await audit(
+        repo,
+        actor,
+        "excuse.close",
+        entity_type="excuse",
+        entity_id=closed.id,
+        студент=student.full_name if student else None,
+        период=_range(closed),
+    )
+    await show_excuse_card(target, repo, config, closed.id, notice="Больничный закрыт")
+
+
+@router.callback_query(F.data.startswith("exclose:"))
+async def close_excuse_start(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    excuse = await repo.get_excuse(int(cb.data.split(":", 1)[1]))
+    if excuse is None or not excuse.is_active or not excuse.is_open or excuse.kind != "sick":
+        await answer_callback(cb, "Больничный уже закрыт или отменён", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(ExcuseSG.close_on)
+    await state.update_data(exc_close_id=excuse.id, exc_from=excuse.date_from)
+    start = date.fromisoformat(excuse.date_from).strftime("%d.%m.%Y")
+    await respond(
+        cb,
+        f"Открытый больничный с {start}.\n\nПо какую дату закрыть (включительно)?",
+        _close_keyboard(excuse.id, local_today(config.timezone)),
+    )
+
+
+@router.callback_query(ExcuseSG.close_on, F.data.startswith("excdt:"))
+async def close_excuse_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
+    await _close_excuse(cb, state, repo, config, actor, date.fromisoformat(cb.data.split(":", 1)[1]))
+
+
+@router.message(ExcuseSG.close_on, F.text)
+async def close_excuse_text(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
+    try:
+        day = parse_date_text(message.text or "", today=local_today(config.timezone))
+    except ValueError:
+        data = await state.get_data()
+        excuse_id = int(data.get("exc_close_id") or 0)
+        back = f"exc:{excuse_id}" if excuse_id else SEC_EXCUSES
+        await message.answer("Не понял дату. Пример: <code>20.09.2026</code>.", reply_markup=cancel_kb(back))
+        return
+    await _close_excuse(message, state, repo, config, actor, day)

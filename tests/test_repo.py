@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 
 import pytest
 
@@ -144,6 +145,17 @@ async def test_requests_and_excuses(repo: Repo):
     assert await repo.list_excuses() == []
     assert (await repo.get_excuse(ex.id)).cancelled_by == 1
 
+    opened = await repo.create_excuse(s.id, "sick", "2026-09-10", None, None, 1)
+    assert opened.is_open and opened.date_to is None
+    assert opened.covers(date(2026, 9, 10)) and opened.covers(date(2026, 12, 1))
+    assert not opened.covers(date(2026, 9, 9))
+    with pytest.raises(ValueError):
+        await repo.create_excuse(s.id, "leave", "2026-09-10", None, None, 1)
+    closed = await repo.close_excuse(opened.id, "2026-09-12")
+    assert closed is not None and closed.date_to == "2026-09-12" and not closed.is_open
+    assert closed.covers(date(2026, 9, 12)) and not closed.covers(date(2026, 9, 13))
+    assert await repo.close_excuse(opened.id, "2026-09-20") is None
+
 
 async def test_audit_records_actor_role(repo: Repo):
     a = actor("chief_marker")
@@ -230,6 +242,38 @@ async def test_toggle_presence_and_request_approval_are_atomic(repo: Repo):
     assert (await repo.approve_request_with_attendance(req.id, 6)).code == "resolved"
     assert [item.id for item in await repo.list_requests(status=None, closed_only=True)] == [req.id]
     assert await repo.list_requests(status="open") == []
+
+
+async def test_open_excuse_migration_keeps_existing_rows(tmp_path):
+    config = make_config(tmp_path)
+    db = Database(config)
+    await db.connect()
+    try:
+        for version, path in db._migration_files():
+            if version >= 5:
+                continue
+            await db._apply_migration_unlocked(version, path.read_text(encoding="utf-8"))
+        await db.conn.executescript(
+            """
+            INSERT INTO students (full_name, joined_on, status, created_at, updated_at)
+            VALUES ('А', '2026-09-01', 'active', 't', 't');
+            INSERT INTO excuses (student_id, kind, date_from, date_to, created_by, created_at)
+            VALUES (1, 'sick', '2026-09-01', '2026-09-05', 1, 't');
+            """
+        )
+        await db.migrate()
+        assert await db.user_version() == 5
+        async with db.conn.execute("SELECT date_to FROM excuses WHERE id = 1") as cur:
+            row = await cur.fetchone()
+        assert row[0] == "2026-09-05"
+        async with db.conn.execute("PRAGMA table_info(excuses)") as cur:
+            columns = {info["name"]: info["notnull"] for info in await cur.fetchall()}
+        assert columns["date_to"] == 0
+        repo = Repo(db)
+        opened = await repo.create_excuse(1, "sick", "2026-09-10", None, None, 1)
+        assert opened.date_to is None
+    finally:
+        await db.close()
 
 
 async def test_failed_migration_does_not_bump_version(tmp_path):
