@@ -274,6 +274,9 @@ class Repo:
     async def get_user(self, telegram_id: int) -> User | None:
         return _opt(User, await self._fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)))
 
+    async def list_users(self) -> list[User]:
+        return _many(User, await self._fetchall("SELECT * FROM users"))
+
     async def bot_usage(self) -> BotUsage:
         """Accounts that wrote to the bot, and how many are linked to a student card.
 

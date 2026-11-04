@@ -35,6 +35,7 @@ from utils.callbacks import (
     SEC_WIPE,
     SEC_TEMPLATES,
     SEC_VERIFY,
+    SEC_BROADCAST,
 )
 from utils.formatting import truncate
 from utils.time import MONTHS_RU_NOM, WEEKDAYS_RU, days_in_month, month_shift
@@ -110,6 +111,7 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
         b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS), btn(req_label, SEC_REQUESTS))
         b.row(btn("🩺 Больничные и отпросы", SEC_EXCUSES), btn("📋 Шаблоны", SEC_TEMPLATES))
         b.row(btn("🔗 Верификация", SEC_VERIFY), btn("🕵️ Журнал действий", SEC_AUDIT))
+        b.row(btn("📢 Сообщение", SEC_BROADCAST))
     else:
         b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS))
     if level >= LEVEL_CHIEF_MARKER:

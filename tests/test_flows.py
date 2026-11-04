@@ -101,6 +101,7 @@ async def test_guest_sees_public_menu_only(h: Harness):
     assert buttons["🗓 Месяцы и отчёты"] == "s:mon"
     assert "➕ Новое занятие" not in buttons
     assert "🩺 Больничные и отпросы" not in buttons
+    assert "📢 Сообщение" not in buttons
     assert "🔗 Верификация" not in buttons
     assert "👤 Моя посещаемость" not in buttons
     # permission check is enforced in the handler, not just by hiding the button

@@ -67,3 +67,8 @@ class PickSG(StatesGroup):
 class WipeSG(StatesGroup):
     warned = State()
     word = State()
+
+
+class BroadcastSG(StatesGroup):
+    text = State()
+    confirm = State()

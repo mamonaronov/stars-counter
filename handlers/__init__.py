@@ -6,6 +6,7 @@ from aiogram import Router
 
 from handlers import (
     attendance,
+    broadcast,
     audit,
     events,
     excuses,
@@ -35,6 +36,7 @@ def setup_routers() -> Router:
     root.include_router(students.router)
     root.include_router(roles.router)
     root.include_router(audit.router)
+    root.include_router(broadcast.router)
     root.include_router(service.router)
     root.include_router(uptime.router)
     root.include_router(usage.router)
