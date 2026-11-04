@@ -9,13 +9,13 @@ from aiogram.types import CallbackQuery, Message
 
 from config import Config
 from database.queries import Repo
-from handlers.common import render_student_picker, show_main
+from handlers.common import render_student_picker, respond, show_main
 from keyboards.main import back_kb
 from middlewares import build_actor
 from services.audit import audit
 from services.roles import LEVEL_ADMIN, LEVEL_CHIEF_ADMIN, LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor
 from states import PickSG
-from utils.callbacks import NAV_CANCEL, NAV_MAIN, NOOP, SEC_HELP
+from utils.callbacks import NAV_CANCEL, NAV_MAIN, NOOP, SEC_AUTHOR, SEC_HELP
 from utils.formatting import esc
 from utils.telegram import answer_callback
 
@@ -158,6 +158,18 @@ async def cb_help(cb: CallbackQuery, actor: Actor | None) -> None:
     from utils.telegram import safe_edit
 
     await safe_edit(cb.message, help_text(actor), back_kb())
+
+
+AUTHOR_TEXT = (
+    "✍️ <b>Автор</b>\n\n"
+    "Бота сделал Аарон Мамонов.\n"
+    'Telegram: <a href="https://t.me/AaronisheBeats">@AaronisheBeats</a>'
+)
+
+
+@router.callback_query(F.data == SEC_AUTHOR)
+async def cb_author(cb: CallbackQuery) -> None:
+    await respond(cb, AUTHOR_TEXT, back_kb())
 
 
 @router.callback_query(F.data.in_({NAV_MAIN, NAV_CANCEL}))

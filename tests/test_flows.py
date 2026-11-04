@@ -79,6 +79,16 @@ async def test_bot_usage_is_visible_only_to_admin(h: Harness):
     assert "Не верифицированы: <b>2</b>" in text
 
 
+async def test_author_button_names_the_maker(h: Harness):
+    await h.text(GUEST, "/start")
+    assert h.buttons()["✍️ Автор"] == "s:auth"
+    await h.press(GUEST, "Автор")
+    text = h.last_text()
+    assert "Аарон Мамонов" in text
+    assert "@AaronisheBeats" in text
+    assert "https://t.me/AaronisheBeats" in text
+
+
 async def test_guest_sees_public_menu_only(h: Harness):
     await h.text(GUEST, "/start")
     buttons = h.buttons()

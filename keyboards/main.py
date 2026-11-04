@@ -15,6 +15,7 @@ from utils.callbacks import (
     NAV_MAIN,
     NOOP,
     SEC_ATTENDANCE,
+    SEC_AUTHOR,
     SEC_AUDIT,
     SEC_EVENTS,
     SEC_EXCUSES,
@@ -118,7 +119,7 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
         b.row(btn("🛠 Сервис", SEC_SERVICE))
     if level >= LEVEL_CHIEF_ADMIN:
         b.row(btn("🧹 Очистить все данные", SEC_WIPE))
-    b.row(btn("ℹ️ Помощь", SEC_HELP))
+    b.row(btn("ℹ️ Помощь", SEC_HELP), btn("✍️ Автор", SEC_AUTHOR))
     return b.as_markup()
 
 
