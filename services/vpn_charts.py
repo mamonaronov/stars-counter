@@ -29,7 +29,7 @@ from services.chart_theme import (
     render_off_loop,
     style_legend as _style_legend,
 )
-from services.vpn_monitor import SUBSCRIPTION_LABELS, subscription_label
+from services.vpn_monitor import SUBSCRIPTION_LABELS, effective_subscription, subscription_label
 from utils.time import parse_iso, zone
 from utils.uptime import host_uptime_seconds
 
@@ -218,7 +218,7 @@ def samples_to_timeline(
         elif color_by_ping:
             color_key = ping_bucket_key(ping)
         elif color_by_sub:
-            color_key = subscription_label(sample.subscription)
+            color_key = subscription_label(effective_subscription(sample.subscription, sample.node_name))
         else:
             color_key = node
         points.append(

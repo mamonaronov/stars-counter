@@ -11,8 +11,21 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import VPN_DB_MAX_BYTES, load_config
 from database.vpn_database import sqlite_bundle_bytes
 from services.jobs import setup_scheduler, vpn_monitor_job, vpn_monitor_job_timeout
-from services.vpn_monitor import VpnMonitor, ping_status_line
+from services.vpn_monitor import VpnMonitor, parse_node, ping_status_line
 from tests.conftest import make_config
+
+
+def test_parse_node_reads_subscription_from_the_name():
+    assert parse_node("s3 | Cyprus | [BL]-01")[1] == "sub3"
+    assert parse_node("Платная | 🇦🇹 №4 LTE x7 трафик")[1] == "paid"
+    black = "🏴 ЧЕРНЫЕ СПИСКИ 🏴 BLACK LISTS | Mobile-150 | 🇸🇪 Sweden | [BL]-02"
+    assert parse_node(black)[1] == "black"
+    white = "🏳️ БЕЛЫЕ СПИСКИ 🏳️ WHITE LISTS | CIDR | Полная • Full | 🇩🇪 Germany | [*CIDR]-04"
+    assert parse_node(white)[1] == "sub4"
+    sni = "🏳️ БЕЛЫЕ СПИСКИ 🏳️ WHITE LISTS | SNI | 🇩🇪 Germany"
+    assert parse_node(sni)[1] == "sub5"
+    assert parse_node(None) == (None, None)
+    assert parse_node("   ") == (None, None)
 
 
 def test_vpn_monitor_config_defaults(monkeypatch):

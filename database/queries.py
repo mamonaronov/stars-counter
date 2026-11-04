@@ -1298,37 +1298,53 @@ class Repo:
     async def vpn_top_subscriptions(self, start: str, end: str, limit: int = 5) -> list[dict[str, Any]]:
         if self.db.vpn_db is None:
             return []
+        # Imported lazily: vpn_monitor imports Repo from this module.
+        from services.vpn_monitor import effective_subscription
+
         rows = await self.vpn_fetchall(
             """
-            SELECT
-                subscription,
-                COUNT(*) AS samples,
-                AVG(CASE WHEN ok = 1 THEN latency_ms END) AS avg_ms,
-                MIN(CASE WHEN ok = 1 THEN latency_ms END) AS min_ms,
-                MAX(CASE WHEN ok = 1 THEN latency_ms END) AS max_ms,
-                SUM(CASE WHEN ok = 1 THEN 0 ELSE 1 END) AS fail_count
+            SELECT node_name, subscription, ok, latency_ms
             FROM vpn_latency_samples
             WHERE measured_at >= ? AND measured_at < ?
-            GROUP BY subscription
-            ORDER BY samples DESC
-            LIMIT ?
             """,
-            (start, end, limit),
+            (start, end),
         )
-        result = [dict(r) for r in rows]
+        buckets: dict[str | None, dict[str, Any]] = {}
+        resolved_rows: list[dict[str, Any]] = []
+        for row in rows:
+            key = effective_subscription(row["subscription"], row["node_name"])
+            sample = {"subscription": key, "ok": row["ok"], "latency_ms": row["latency_ms"]}
+            resolved_rows.append(sample)
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = {
+                    "subscription": key,
+                    "samples": 0,
+                    "sum_ms": 0,
+                    "ok_count": 0,
+                    "min_ms": None,
+                    "max_ms": None,
+                    "fail_count": 0,
+                }
+                buckets[key] = bucket
+            bucket["samples"] += 1
+            if row["ok"] and row["latency_ms"] is not None:
+                latency = int(row["latency_ms"])
+                bucket["sum_ms"] += latency
+                bucket["ok_count"] += 1
+                bucket["min_ms"] = latency if bucket["min_ms"] is None else min(bucket["min_ms"], latency)
+                bucket["max_ms"] = latency if bucket["max_ms"] is None else max(bucket["max_ms"], latency)
+            else:
+                bucket["fail_count"] += 1
+        result = sorted(buckets.values(), key=lambda item: item["samples"], reverse=True)[:limit]
+        for item in result:
+            ok_count = item.pop("ok_count")
+            total_ms = item.pop("sum_ms")
+            item["avg_ms"] = (total_ms / ok_count) if ok_count else None
         if not result:
             return result
-        clauses = ["(subscription IS ?)"] * len(result)
-        params: list[Any] = [start, end, *[item["subscription"] for item in result]]
-        lat_rows = await self.vpn_fetchall(
-            f"""
-            SELECT subscription, ok, latency_ms
-            FROM vpn_latency_samples
-            WHERE measured_at >= ? AND measured_at < ?
-              AND ({" OR ".join(clauses)})
-            """,
-            params,
-        )
+        keep = {item["subscription"] for item in result}
+        lat_rows = [sample for sample in resolved_rows if sample["subscription"] in keep]
         ok_grouped, nop_grouped = _split_vpn_tail_rows(lat_rows, lambda sample: sample["subscription"])
         _apply_vpn_tail_stats(result, ok_grouped, nop_grouped, lambda item: item["subscription"])
         return result

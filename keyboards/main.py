@@ -328,21 +328,20 @@ _VPN_SPAN_LABELS = {
     "24h": "сутки",
     "7d": "неделю",
     "30d": "месяц",
+    "boot": "время с запуска",
     "all": "всё время",
 }
 
 
-def _vpn_state(view: str, *, rounded: bool = False, since_boot: bool = False) -> str:
+def _vpn_state(view: str, *, rounded: bool = False) -> str:
     parts = [view]
     if view == "a" and rounded:
         parts.append("r")
-    if since_boot:
-        parts.append("b")
     return ":".join(parts)
 
 
-def _vpn_callback(kind: str, period: str, view: str, *, rounded: bool = False, since_boot: bool = False) -> str:
-    return f"{kind}:{period}:{_vpn_state(view, rounded=rounded, since_boot=since_boot)}"
+def _vpn_callback(kind: str, period: str, view: str, *, rounded: bool = False) -> str:
+    return f"{kind}:{period}:{_vpn_state(view, rounded=rounded)}"
 
 
 def admin_vpn_kb(
@@ -350,43 +349,40 @@ def admin_vpn_kb(
     view: str = "n",
     *,
     rounded: bool = False,
-    since_boot: bool = False,
 ) -> InlineKeyboardMarkup:
     if view not in {"n", "s", "a"}:
         view = "n"
     if view != "a":
         rounded = False
 
-    def tail(next_view: str, *, next_rounded: bool = False, next_boot: bool = since_boot) -> str:
-        return _vpn_callback("adv", period, next_view, rounded=next_rounded, since_boot=next_boot)
+    def tail(next_view: str, *, next_rounded: bool = False) -> str:
+        return _vpn_callback("adv", period, next_view, rounded=next_rounded)
 
     b = InlineKeyboardBuilder()
     rows = (
         (("5m", "5 мин"), ("30m", "30 мин"), ("1h", "1 ч")),
         (("6h", "6 ч"), ("12h", "12 ч"), ("24h", "сутки")),
-        (("7d", "неделя"), ("30d", "месяц"), ("all", "всё время")),
+        (("7d", "неделя"), ("30d", "месяц"), ("boot", "С запуска"), ("all", "всё время")),
     )
-    state = _vpn_state(view, rounded=rounded, since_boot=since_boot)
+    state = _vpn_state(view, rounded=rounded)
     for labels in rows:
         b.row(*[btn(_selected(label, key == period), f"adv:{key}:{state}") for key, label in labels])
     b.row(
         btn(_selected("Ноды", view == "n"), tail("n")),
         btn(_selected("Подписки", view == "s"), tail("s")),
         btn(_selected("Доступность", view == "a"), tail("a", next_rounded=rounded)),
-        btn(_selected("С запуска", since_boot), tail(view, next_rounded=rounded, next_boot=not since_boot)),
     )
     span = _VPN_SPAN_LABELS.get(period, "сутки")
-    boot = ":b" if since_boot else ""
     if view == "a":
         b.row(btn(_selected("Округление", rounded), tail("a", next_rounded=not rounded)))
-    b.row(btn(f"📄 Логи за {span}", f"advl:{period}{boot}"))
+    b.row(btn(f"📄 Логи за {span}", f"advl:{period}"))
     if view == "a":
-        b.row(btn(f"📈 Доступность за {span}", f"advc:{period}:a" + (":r" if rounded else "") + boot))
+        b.row(btn(f"📈 Доступность за {span}", f"advc:{period}:a" + (":r" if rounded else "")))
     else:
         chart_view = ":s" if view == "s" else ""
-        b.row(btn(f"📈 Картинки за {span}", f"advc:{period}{chart_view}{boot}"))
+        b.row(btn(f"📈 Картинки за {span}", f"advc:{period}{chart_view}"))
     b.row(btn(f"📈 Load avg за {span}", f"adld:{period}"))
-    b.row(btn("🗑 Очистить пинги", _vpn_callback("advw", period, view, since_boot=since_boot)))
+    b.row(btn("🗑 Очистить пинги", _vpn_callback("advw", period, view)))
     b.row(btn("🛠 Сервис", SEC_SERVICE), btn("🏠 Меню", NAV_MAIN))
     return b.as_markup()
 

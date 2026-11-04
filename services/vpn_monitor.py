@@ -26,17 +26,55 @@ logger = logging.getLogger(__name__)
 
 NODE_PREFIX_RE = re.compile(r"^(s\d+)\s+\|")
 
-# Labels match mihomo-proxy subscription prefixes (s1 | …).
+# Labels match mihomo-proxy subscription prefixes (s1 | …) and the names
+# the proxy uses when a node is not prefixed with sN.
 SUBSCRIPTION_LABELS = {
     "sub1": "VLESS / все конфиги",
     "sub2": "Shadowsocks+All",
     "sub3": "VLESS / mobile",
     "sub4": "CIDR / белые списки",
     "sub5": "SNI / белые списки",
+    "black": "Чёрные списки",
+    "paid": "Платная",
+    "white": "Белые списки",
+    "compatible": "COMPATIBLE",
 }
+
+_UNRESOLVED_SUBSCRIPTIONS = frozenset({"", "unknown", "—", "-", "неизвестно"})
 
 _SUMMARY_EVERY = 30  # 30 × 10s ≈ 5 minutes
 _GROUP_NOW_HOPS = 5
+
+
+def subscription_from_node_name(name: str) -> str:
+    """Subscription key stored with a sample.
+
+    `s3 | …` stays sub3. Newer mihomo names carry the subscription in the
+    text (`Платная | …`, `ЧЕРНЫЕ СПИСКИ`, `БЕЛЫЕ СПИСКИ | CIDR`) instead of
+    that prefix. Those used to collapse into one `unknown` bucket.
+    """
+    match = NODE_PREFIX_RE.match(name)
+    if match:
+        return f"sub{int(match.group(1)[1:])}"
+    folded = name.casefold()
+    parts = [part.strip() for part in name.split("|") if part.strip()]
+    part_keys = [part.casefold() for part in parts]
+    if "белые списки" in folded or "white lists" in folded:
+        if "sni" in part_keys:
+            return "sub5"
+        if "cidr" in part_keys:
+            return "sub4"
+        return "white"
+    if "черные списки" in folded or "black lists" in folded:
+        return "black"
+    head = part_keys[0] if part_keys else ""
+    if head == "платная":
+        return "paid"
+    if head == "compatible":
+        return "compatible"
+    if parts:
+        return "name:" + parts[0]
+    return "unknown"
 
 
 def parse_node(now: str | None) -> tuple[str | None, str | None]:
@@ -44,16 +82,23 @@ def parse_node(now: str | None) -> tuple[str | None, str | None]:
     if not now or not str(now).strip():
         return None, None
     name = str(now).strip()
-    match = NODE_PREFIX_RE.match(name)
-    if not match:
-        return name, "unknown"
-    prefix = match.group(1)
-    return name, f"sub{int(prefix[1:])}"
+    return name, subscription_from_node_name(name)
+
+
+def effective_subscription(subscription: str | None, node_name: str | None) -> str | None:
+    """Subscription to show. Old rows kept the node name and stored `unknown`."""
+    if subscription and subscription not in _UNRESOLVED_SUBSCRIPTIONS:
+        return subscription
+    if node_name and str(node_name).strip():
+        return subscription_from_node_name(str(node_name).strip())
+    return None
 
 
 def subscription_label(subscription: str | None) -> str:
-    if not subscription:
+    if not subscription or subscription in _UNRESOLVED_SUBSCRIPTIONS:
         return "неизвестно"
+    if subscription.startswith("name:"):
+        return subscription[5:] or "неизвестно"
     return SUBSCRIPTION_LABELS.get(subscription, subscription)
 
 
@@ -83,7 +128,7 @@ def format_vpn_log(samples: list[dict], start: str, end: str, tz_name: str = "UT
         ms_s = f"{ms}ms" if ms is not None else "—"
         error = str(sample.get("error") or "—")
         node = str(sample.get("node_name") or "—")
-        sub = str(sample.get("subscription") or "—")
+        sub = subscription_label(effective_subscription(sample.get("subscription"), sample.get("node_name")))
         rows.append((human, status, ms_s, error, node, sub, raw))
     headers = ("время", "статус", "пинг", "ошибка", "нода", "подписка", "ISO")
     widths = [len(title) for title in headers]

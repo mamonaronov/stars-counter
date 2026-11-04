@@ -38,6 +38,23 @@ def test_uptime_report_lines(monkeypatch):
     assert "&lt;commit&gt;" in lines[0]
 
 
+def test_subscription_chart_uses_the_node_name_when_the_stored_key_is_unknown():
+    from database.models import VpnLatencySample
+    from services.vpn_charts import samples_to_timeline
+
+    sample = VpnLatencySample(
+        id=1,
+        measured_at="2026-11-04T12:00:00+00:00",
+        ok=1,
+        latency_ms=40,
+        node_name="Платная | 🇦🇹 №4 LTE x7 трафик",
+        subscription="unknown",
+        error=None,
+    )
+    points = samples_to_timeline([sample], color_by_sub=True)
+    assert points[0].color_key == "Платная"
+
+
 def test_answered_probe_stays_a_ping_when_node_lookup_fails():
     from services.vpn_charts import SIGNAL_NO_PING, classify_vpn_signal
 
@@ -51,50 +68,52 @@ def test_answered_probe_stays_a_ping_when_node_lookup_fails():
 
 
 def test_uptime_keyboard_matches_daily_stats_periods():
-    labels = list(admin_vpn_kb("24h", "n").inline_keyboard)
-    texts = [button.text for row in labels for button in row]
-    assert "[сутки]" in texts
-    assert "[Ноды]" in texts
-    assert "Подписки" in texts
-    assert "Доступность" in texts
+    rows = admin_vpn_kb("24h", "n").inline_keyboard
+    texts = [button.text for row in rows for button in row]
+    assert [[button.text for button in row] for row in rows[:4]] == [
+        ["5 мин", "30 мин", "1 ч"],
+        ["6 ч", "12 ч", "[сутки]"],
+        ["неделя", "месяц", "С запуска", "всё время"],
+        ["[Ноды]", "Подписки", "Доступность"],
+    ]
     assert "📄 Логи за сутки" in texts
     assert "📈 Картинки за сутки" in texts
     assert "📈 Load avg за сутки" in texts
     assert "🗑 Очистить пинги" in texts
     assert "🛠 Сервис" in texts
     assert "🏠 Меню" in texts
-    assert "С запуска" in texts
     assert "[С запуска]" not in texts
-    assert "5 мин" in texts and "всё время" in texts
 
 
 def _kb_buttons(markup) -> dict[str, str]:
     return {button.text: button.callback_data for row in markup.inline_keyboard for button in row}
 
 
-def test_since_boot_toggle_stays_with_the_view():
-    buttons = _kb_buttons(admin_vpn_kb("7d", "a", rounded=True, since_boot=True))
-    assert [button.text for row in admin_vpn_kb("7d", "a", rounded=True, since_boot=True).inline_keyboard for button in row if button.text in {"Ноды", "Подписки", "[Доступность]", "[С запуска]"}] == [
+def test_boot_period_button_stays_with_the_view():
+    buttons = _kb_buttons(admin_vpn_kb("boot", "a", rounded=True))
+    assert [button.text for row in admin_vpn_kb("boot", "a", rounded=True).inline_keyboard for button in row if button.text in {"Ноды", "Подписки", "[Доступность]", "[С запуска]", "всё время"}] == [
+        "[С запуска]",
+        "всё время",
         "Ноды",
         "Подписки",
         "[Доступность]",
-        "[С запуска]",
     ]
-    assert buttons["Ноды"] == "adv:7d:n:b"
-    assert buttons["Подписки"] == "adv:7d:s:b"
-    assert buttons["[Доступность]"] == "adv:7d:a:r:b"
-    assert buttons["[С запуска]"] == "adv:7d:a:r"
-    assert buttons["5 мин"] == "adv:5m:a:r:b"
-    assert buttons["[Округление]"] == "adv:7d:a:b"
-    assert buttons["📄 Логи за неделю"] == "advl:7d:b"
-    assert buttons["📈 Доступность за неделю"] == "advc:7d:a:r:b"
-    assert buttons["📈 Load avg за неделю"] == "adld:7d"
-    assert buttons["🗑 Очистить пинги"] == "advw:7d:a:b"
+    assert buttons["Ноды"] == "adv:boot:n"
+    assert buttons["Подписки"] == "adv:boot:s"
+    assert buttons["[Доступность]"] == "adv:boot:a:r"
+    assert buttons["[С запуска]"] == "adv:boot:a:r"
+    assert buttons["5 мин"] == "adv:5m:a:r"
+    assert buttons["всё время"] == "adv:all:a:r"
+    assert buttons["[Округление]"] == "adv:boot:a"
+    assert buttons["📄 Логи за время с запуска"] == "advl:boot"
+    assert buttons["📈 Доступность за время с запуска"] == "advc:boot:a:r"
+    assert buttons["📈 Load avg за время с запуска"] == "adld:boot"
+    assert buttons["🗑 Очистить пинги"] == "advw:boot:a"
     assert buttons["🏠 Меню"] == "n:m"
-    assert _parse_vpn_view(buttons["[Доступность]"]) == ("7d", "a", True, True)
-    assert _parse_vpn_view(buttons["[С запуска]"]) == ("7d", "a", True, False)
-    assert _parse_vpn_chart(buttons["📈 Доступность за неделю"]) == ("7d", True, True, False, True)
-    assert _kb_buttons(admin_vpn_kb())["С запуска"] == "adv:24h:n:b"
+    assert _parse_vpn_view(buttons["[Доступность]"]) == ("boot", "a", True, False)
+    assert _parse_vpn_view(buttons["[С запуска]"]) == ("boot", "a", True, False)
+    assert _parse_vpn_chart(buttons["📈 Доступность за время с запуска"]) == ("boot", True, True, False, False)
+    assert _kb_buttons(admin_vpn_kb())["С запуска"] == "adv:boot:n"
 
 
 async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
@@ -157,6 +176,36 @@ async def test_vpn_summary_buckets_and_report(repo, monkeypatch):
     assert "Топ подписок:" in subs
     assert "VLESS / mobile" in subs
     assert "Топ нод:" not in subs
+
+
+async def test_subscription_top_names_nodes_stored_as_unknown(repo):
+    now = to_iso(now_utc())
+    await repo.insert_vpn_sample(now, True, 40, "Платная | 🇦🇹 №4 LTE x7 трафик", "unknown", None, 1.0)
+    await repo.insert_vpn_sample(
+        now,
+        True,
+        80,
+        "🏴 ЧЕРНЫЕ СПИСКИ 🏴 BLACK LISTS | Mobile-150 | 🇸🇪 Sweden | [BL]-02",
+        "unknown",
+        None,
+        1.0,
+    )
+    await repo.insert_vpn_sample(
+        now,
+        True,
+        90,
+        "🏳️ БЕЛЫЕ СПИСКИ 🏳️ WHITE LISTS | CIDR | Полная • Full | 🇩🇪 Germany | [*CIDR]-04",
+        "unknown",
+        None,
+        1.0,
+    )
+    text = html.unescape(await _vpn_report(repo, repo.db.config, "24h", view="s"))
+    assert "Платная" in text
+    assert "Чёрные списки" in text
+    assert "CIDR / белые списки" in text
+    assert "• unknown" not in text
+    assert "• —" not in text
+    assert "(—)" not in text
 
     availability = await _vpn_report(repo, repo.db.config, "24h", view="a")
     assert "Топ нод:" not in availability
@@ -239,18 +288,18 @@ async def test_since_boot_cuts_the_window_at_process_start(repo, monkeypatch):
         to_iso(end - timedelta(minutes=10)), False, 20, "fresh-node", "sub", "timeout", 1.0
     )
     full = await _vpn_report(repo, repo.db.config, "all", now=end)
-    cut = await _vpn_report(repo, repo.db.config, "all", now=end, since_boot=True)
+    cut = await _vpn_report(repo, repo.db.config, "boot", now=end)
     assert "Замеров: 2" in full
     assert "old-node" in full and "fresh-node" in full
-    assert "За всё время, с запуска бота" in cut
+    assert "За время с запуска бота" in cut
     assert "Замеров: 1" in cut
     assert "fresh-node" in cut
     assert "old-node" not in cut
     assert "ошибок: 1" in cut
 
     monkeypatch.setattr(screen, "bot_uptime_seconds", lambda: None)
-    unknown = await _vpn_report(repo, repo.db.config, "24h", now=end, since_boot=True)
-    assert "запуск бота неизвестен" in unknown
+    unknown = await _vpn_report(repo, repo.db.config, "boot", now=end)
+    assert "запуск неизвестен" in unknown
     assert "Замеров: 2" in unknown
 
 
@@ -294,7 +343,7 @@ async def test_superadmin_wipes_ping_samples_only(h):
     assert any(row[0] == now and row[1:] == (0.1, 0.2, 0.3) for row in kept)
 
 
-async def test_since_boot_toggle_filters_the_open_screen(h, monkeypatch):
+async def test_boot_period_filters_the_open_screen(h, monkeypatch):
     import handlers.uptime as screen
 
     monkeypatch.setattr(screen, "bot_uptime_seconds", lambda: 30 * 60)
@@ -306,20 +355,19 @@ async def test_since_boot_toggle_filters_the_open_screen(h, monkeypatch):
     await h.click(1, "s:srv")
     await h.press(1, "Аптайм")
     assert "Замеров: 2" in h.last_text()
-    assert h.buttons()["С запуска"] == "adv:24h:n:b"
+    assert h.buttons()["С запуска"] == "adv:boot:n"
+    assert "[сутки]" in h.buttons()
     await h.press(1, "С запуска")
     assert "[С запуска]" in h.buttons()
-    assert "с запуска бота" in h.last_text()
+    assert "[сутки]" not in h.buttons()
+    assert "За время с запуска бота" in h.last_text()
     assert "Замеров: 1" in h.last_text()
     assert "fresh-node" in h.last_text()
     assert "old-node" not in h.last_text()
     await h.press(1, "всё время")
-    assert "[С запуска]" in h.buttons()
-    assert "За всё время, с запуска бота" in h.last_text()
-    assert "old-node" not in h.last_text()
-    await h.press(1, "С запуска")
-    assert "С запуска" in h.buttons()
+    assert "[всё время]" in h.buttons()
     assert "[С запуска]" not in h.buttons()
+    assert "За всё время" in h.last_text()
     assert "с запуска бота" not in h.last_text()
     assert "old-node" in h.last_text() and "fresh-node" in h.last_text()
 
