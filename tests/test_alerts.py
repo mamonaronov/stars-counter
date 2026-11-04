@@ -59,8 +59,31 @@ async def test_lifecycle_notice_reaches_admins_then_opens_their_menu(repo, confi
     assert "🧹 Очистить все данные" in _buttons(by_chat[41][1])
     assert "🛠 Сервис" not in _buttons(by_chat[41][1])
     assert "📈 Статистика бота" in _buttons(by_chat[42][1])
+    assert "📋 Логи контейнеров" in _buttons(by_chat[42][1])
     assert "🧹 Очистить все данные" not in _buttons(by_chat[42][1])
     assert 43 not in by_chat
+
+
+async def test_startup_notice_skips_a_second_menu_when_the_screen_was_refreshed(repo, config):
+    await _link_admins(repo)
+    session = FakeSession()
+    bot = Bot(token="0:test", default=DefaultBotProperties(parse_mode=ParseMode.HTML), session=session)
+    try:
+        await notify_lifecycle(bot, repo, config, BOT_STARTED_TEXT, menu_ready={1, 41})
+    finally:
+        await bot.session.close()
+
+    sent = [call for call in session.calls if type(call).__name__ == "SendMessage"]
+    by_chat: dict[int, list] = {}
+    for call in sent:
+        by_chat.setdefault(call.chat_id, []).append(call)
+
+    assert len(by_chat[1]) == 1
+    assert by_chat[1][0].text == BOT_STARTED_TEXT
+    assert len(by_chat[41]) == 1
+    notice, menu = by_chat[42]
+    assert notice.text == BOT_STARTED_TEXT
+    assert "Посещаемость" in menu.text
 
 
 async def test_stop_notice_is_one_silent_line(repo, config):

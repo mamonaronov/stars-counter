@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-REQUIRED_DB_VERSION = 5
+REQUIRED_DB_VERSION = 6
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
@@ -93,6 +93,9 @@ class Config:
     mihomo_proxy_group: str = "AUTO"
     load_db_path: Path | None = None
     load_log_keep_days: int = 31
+    docker_socket: Path = Path("/var/run/docker.sock")
+    bot_container_name: str = "stars-counter-bot"
+    mihomo_container_name: str = "mihomo-proxy"
 
 
 def load_config() -> Config:
@@ -134,4 +137,7 @@ def load_config() -> Config:
         mihomo_proxy_group=os.getenv("MIHOMO_PROXY_GROUP", "AUTO").strip() or "AUTO",
         load_db_path=Path(load_db_raw) if load_db_raw else db_path.with_name("load.sqlite3"),
         load_log_keep_days=max(0, _int("LOAD_LOG_KEEP_DAYS", 31)),
+        docker_socket=Path(os.getenv("DOCKER_SOCKET", "").strip() or "/var/run/docker.sock"),
+        bot_container_name=os.getenv("BOT_CONTAINER_NAME", "").strip() or "stars-counter-bot",
+        mihomo_container_name=os.getenv("MIHOMO_CONTAINER_NAME", "").strip() or "mihomo-proxy",
     )

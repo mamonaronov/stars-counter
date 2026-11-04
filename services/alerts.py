@@ -108,14 +108,17 @@ async def notify_lifecycle(
     *,
     storage: BaseStorage | None = None,
     with_menu: bool = True,
+    menu_ready: set[int] | None = None,
 ) -> None:
     """Tell admins the bot started or is stopping.
 
     Startup sends the notice, then the same main menu as /start, and drops any
-    draft so the next message is not swallowed by an old dialog. Shutdown sends
-    only the silent line: the menu would die with the process, and the next
-    start clears drafts anyway. Those sends run together under a short budget
-    so they fit beside the backup inside Docker's stop grace.
+    draft so the next message is not swallowed by an old dialog. Chats in
+    ``menu_ready`` already had that menu written into their last screen, so
+    they only get the notice. Shutdown sends only the silent line: the menu
+    would die with the process, and the next start clears drafts anyway.
+    Those sends run together under a short budget so they fit beside the
+    backup inside Docker's stop grace.
     """
     if not with_menu:
         try:
@@ -129,9 +132,12 @@ async def notify_lifecycle(
     from middlewares import build_actor
 
     open_requests = await repo.count_open_requests()
+    ready = menu_ready or set()
     for telegram_id in await lifecycle_recipient_ids(repo, config):
         await _clear_dialog(storage, bot, telegram_id)
         if not await _deliver(bot, telegram_id, text, silent=True):
+            continue
+        if telegram_id in ready:
             continue
         actor = await build_actor(repo, config, telegram_id)
         markup = main_menu(actor, open_requests=open_requests if actor.can_mark else 0)

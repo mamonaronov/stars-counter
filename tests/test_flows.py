@@ -60,17 +60,20 @@ async def test_bot_usage_is_visible_only_to_admin(h: Harness):
 
     await h.text(GUEST, "/start")
     assert "📈 Статистика бота" not in h.buttons()
+    assert "📋 Логи контейнеров" not in h.buttons()
     await h.click(GUEST, "s:use")
     assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
 
     await h.text(MARKER, "/start")
     assert "📈 Статистика бота" not in h.buttons()
+    assert "📋 Логи контейнеров" not in h.buttons()
     await h.click(MARKER, "s:use")
     assert h.session.last("AnswerCallbackQuery").text == "Недостаточно прав для этого действия."
 
     await verify(h, "Гость", STUDENT)
     await h.text(41, "/start")
     assert "📈 Статистика бота" in h.buttons()
+    assert "📋 Логи контейнеров" in h.buttons()
     await h.click(41, "s:use")
     text = h.last_text()
     # superadmin issued the link, guest opened the bot, marker and admin opened it, student verified

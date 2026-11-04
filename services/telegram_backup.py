@@ -54,8 +54,9 @@ CHAT_TITLE_KEY = "telegram_backup_chat_title"
 TELEGRAM_BACKUP_RETRY_INITIAL = timedelta(minutes=1)
 TELEGRAM_BACKUP_RETRY_MAX = timedelta(hours=1)
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Dialog state and one-shot callback ids change on every tap and are not data.
-_IGNORED_TABLES = frozenset({"fsm_storage", "callback_dedup"})
+# Dialog state, button de-duplication and the last private screen are not data.
+# Remembering a message id must not by itself send a backup archive.
+_IGNORED_TABLES = frozenset({"fsm_storage", "callback_dedup", "chat_screens"})
 # Opening the bot rewrites last_seen_at. That is not a reason to send an archive.
 _IGNORED_COLUMNS = {"users": frozenset({"last_seen_at"})}
 _VOLATILE_SYSTEM = (
@@ -67,6 +68,7 @@ _VOLATILE_SYSTEM = (
     "markers_export_fingerprint",
     "markers_export_message_id",
     "markers_export_last_error",
+    "screens_refreshed_commit",
     MIGRATIONS_KEY,
 )
 _ACTIVE_MEMBER = frozenset({"member", "administrator", "creator"})

@@ -13,6 +13,9 @@ services:
     volumes:
       - ./data:/app/data
       - ./backups:/app/backups
+      # Read container logs for the service-panel button. Not read-only: connecting
+      # to a unix socket requires write permission on the socket inode.
+      - /var/run/docker.sock:/var/run/docker.sock
     logging:
       driver: json-file
       options:

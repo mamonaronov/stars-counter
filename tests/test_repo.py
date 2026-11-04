@@ -262,7 +262,7 @@ async def test_open_excuse_migration_keeps_existing_rows(tmp_path):
             """
         )
         await db.migrate()
-        assert await db.user_version() == 5
+        assert await db.user_version() == db.config.required_db_version
         async with db.conn.execute("SELECT date_to FROM excuses WHERE id = 1") as cur:
             row = await cur.fetchone()
         assert row[0] == "2026-09-05"

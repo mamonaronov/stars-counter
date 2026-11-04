@@ -87,6 +87,8 @@ docker compose up -d
 
 Если Telegram с сервера недоступен напрямую, заполните `TELEGRAM_PROXY_URL=socks5h://proxy:11808` и поднимите рядом compose **mihomo-proxy** с Docker-сетью `telegram-proxy`; `./deploy.sh` сам добавит `docker-compose.proxy.yml`.
 
+Кнопка **Логи контейнеров** есть в меню у админа и выше, а у суперадмина ещё и в 🛠 Сервис. Она присылает журналы `stars-counter-bot` и `mihomo-proxy` с момента последнего запуска каждого контейнера, в том же виде, что `docker compose logs`. Если файл больше лимита Telegram, вместо него приходят тома `.z01`, `.z02`, … и `.zip`: все части в одну папку, открыть `.zip` в 7-Zip — получится один лог. Для чтения контейнеров в бота подключён сокет `/var/run/docker.sock`.
+
 Локально без Docker (Python 3.11+):
 
 ```bash
@@ -120,6 +122,9 @@ DB_PATH=./data/database.sqlite3 BACKUP_PATH=./backups python bot.py
 | `MIHOMO_API_URL` | нет | `http://127.0.0.1:19090` | REST mihomo. В Docker: `http://proxy:19090` |
 | `MIHOMO_API_SECRET` | нет | пусто | тот же секрет, что в `.env` mihomo-proxy. Без него пишется только пинг, без имени ноды |
 | `MIHOMO_PROXY_GROUP` | нет | `AUTO` | группа, чью выбранную ноду записывать |
+| `BOT_CONTAINER_NAME` | нет | `stars-counter-bot` | контейнер, чьи логи шлёт кнопка в сервисе |
+| `MIHOMO_CONTAINER_NAME` | нет | `mihomo-proxy` | второй контейнер для той же кнопки |
+| `DOCKER_SOCKET` | нет | `/var/run/docker.sock` | сокет Docker внутри контейнера бота |
 
 ## Первые шаги после запуска
 

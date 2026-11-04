@@ -20,6 +20,7 @@ from utils.callbacks import (
     SEC_EVENTS,
     SEC_EXCUSES,
     SEC_HELP,
+    SEC_LOGS,
     SEC_MONTHS,
     SEC_MY,
     SEC_NEW_EVENT,
@@ -114,7 +115,7 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
     if level >= LEVEL_CHIEF_MARKER:
         b.row(btn("👥 Студенты", SEC_STUDENTS), btn("🎖 Роли", SEC_ROLES))
     if level >= LEVEL_ADMIN:
-        b.row(btn("📈 Статистика бота", SEC_USAGE))
+        b.row(btn("📈 Статистика бота", SEC_USAGE), btn("📋 Логи контейнеров", SEC_LOGS))
     if level >= LEVEL_SUPERADMIN:
         b.row(btn("🛠 Сервис", SEC_SERVICE))
     if level >= LEVEL_CHIEF_ADMIN:

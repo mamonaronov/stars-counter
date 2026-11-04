@@ -12,6 +12,7 @@ RUN apt-get update \
         fonts-dejavu-core \
         gosu \
         tzdata \
+        zip \
     && rm -rf /var/lib/apt/lists/* \
     && gosu nobody true
 

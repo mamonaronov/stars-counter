@@ -52,6 +52,7 @@ ACTION_TITLES: dict[str, str] = {
     "export.unbind": "отключил группу для таблицы посещаемости",
     "vpn.wipe": "очистил замеры пинга",
     "backup.manual": "сделал бэкап",
+    "logs.containers": "запросил логи контейнеров",
     "backup.bind": "подключил группу для бэкапов",
     "backup.unbind": "отключил группу для бэкапов",
 }

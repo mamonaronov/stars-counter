@@ -13,14 +13,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
 from database.queries import Repo
-from handlers.common import require_level, respond
+from handlers.common import require_level, respond, show_main
 from keyboards.main import btn, nav_row
 from services.alerts import notify_superadmin
 from services.audit import audit
+from services.container_logs import DockerError, log_caption, read_runtime_logs
 from services.chat_migration import adopt_if_migrated, note_group_migration
 from services.group_export import KEY_GROUP, KEY_SENT_AT, markers_chat_id, publish_markers_export
 from services.jobs import reschedule_telegram_backup
-from services.roles import LEVEL_SUPERADMIN, Actor
+from services.roles import LEVEL_ADMIN, LEVEL_SUPERADMIN, Actor
 from services.telegram_backup import (
     backup_group_bound_text,
     backup_group_membership_action,
@@ -35,9 +36,9 @@ from services.telegram_backup import (
     telegram_backup_chat,
 )
 from services.vpn_monitor import ping_status_line
-from utils.callbacks import SEC_SERVICE
+from utils.callbacks import SEC_LOGS, SEC_SERVICE
 from utils.formatting import esc
-from utils.telegram import answer_callback
+from utils.telegram import answer_callback, bytes_file
 from utils.time import format_dt_iso
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ async def show_service(cb: CallbackQuery, repo: Repo, config: Config) -> None:
     b = InlineKeyboardBuilder()
     b.row(btn("🗄️ Аптайм", "ad:vpn"))
     b.row(btn("📦 Прислать бэкап сейчас", "srvb"))
+    b.row(btn("📋 Логи контейнеров", "srvlog"))
     if chat_id is not None:
         b.row(btn("📤 Отправить таблицу в группу", "srvg"))
     b.row(*nav_row())
@@ -132,6 +134,61 @@ async def manual_backup(
             logger.exception("Failed to reschedule telegram backup after manual send")
     await audit(repo, actor, "backup.manual")
     await show_service(cb, repo, config)
+
+
+async def _send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bot: Bot, actor: Actor) -> bool:
+    await answer_callback(cb, "Собираю логи…")
+    try:
+        files = await read_runtime_logs(config)
+    except DockerError as exc:
+        if cb.message is not None:
+            await cb.message.answer(str(exc))
+        return False
+    except Exception:
+        logger.exception("Container logs failed")
+        if cb.message is not None:
+            await cb.message.answer("Не удалось прочитать логи контейнеров.")
+        return False
+    for item in files:
+        try:
+            await bot.send_document(
+                cb.from_user.id,
+                bytes_file(item.body, item.filename),
+                caption=log_caption(item, config.timezone),
+                request_timeout=120,
+            )
+        except Exception:
+            logger.exception("Failed to send logs of %s", item.name)
+            if cb.message is not None:
+                await cb.message.answer(f"Не удалось отправить логи {item.name}.")
+    names = list(dict.fromkeys(item.name for item in files))
+    await audit(repo, actor, "logs.containers", контейнеры=", ".join(names))
+    return True
+
+
+@router.callback_query(F.data == SEC_LOGS)
+async def send_container_logs_from_menu(
+    cb: CallbackQuery,
+    state: FSMContext,
+    repo: Repo,
+    config: Config,
+    bot: Bot,
+    actor: Actor | None,
+) -> None:
+    if not await require_level(cb, actor, LEVEL_ADMIN):
+        return
+    assert actor is not None
+    if await _send_container_logs(cb, repo, config, bot, actor):
+        await show_main(cb, actor, config, repo, state)
+
+
+@router.callback_query(F.data == "srvlog")
+async def send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bot: Bot, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_SUPERADMIN):
+        return
+    assert actor is not None
+    if await _send_container_logs(cb, repo, config, bot, actor):
+        await show_service(cb, repo, config)
 
 
 @router.callback_query(F.data == "srvg")

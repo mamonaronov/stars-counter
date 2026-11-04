@@ -39,7 +39,11 @@ _STARTUP_GET_ME_TIMEOUT = 20.0
 
 
 def _make_session(proxy_url: str | None):
-    return make_telegram_session(proxy_url, _POLLING_SESSION_TIMEOUT)
+    from services.screen_memory import attach_screen_memory
+
+    session = make_telegram_session(proxy_url, _POLLING_SESSION_TIMEOUT)
+    attach_screen_memory(session)
+    return session
 
 
 def _bot_session(proxy_url: str | None):
@@ -172,6 +176,9 @@ async def run() -> None:
         raise SystemExit(1) from exc
 
     repo = Repo(db)
+    from services.screen_memory import bind_screen_memory
+
+    bind_screen_memory(db)
     dp = Dispatcher(storage=SqliteStorage(db))
     scheduler = AsyncIOScheduler(timezone="UTC")
     runtime = RuntimeControl()
@@ -234,8 +241,15 @@ async def run() -> None:
             )
         except Exception:
             logger.exception("Failed to set bot commands")
+        refreshed: set[int] = set()
         try:
-            await notify_lifecycle(bot, repo, config, BOT_STARTED_TEXT, storage=dp.storage)
+            from services.screen_memory import refresh_private_screens
+
+            refreshed = await refresh_private_screens(bot, repo, config, dp.storage)
+        except Exception:
+            logger.exception("Failed to refresh private screens")
+        try:
+            await notify_lifecycle(bot, repo, config, BOT_STARTED_TEXT, storage=dp.storage, menu_ready=refreshed)
         except Exception:
             logger.exception("Startup notice failed")
 
