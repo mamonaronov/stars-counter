@@ -28,6 +28,17 @@ async def h(tmp_path):
         await db.close()
 
 
+async def test_verification_list_marks_verified_students(h: Harness):
+    bound = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(bound.id, 50)
+    await h.repo.create_student("Петров Пётр", 2023, "2026-09-01", SUPER)
+    await h.click(SUPER, "s:ver")
+    buttons = h.buttons()
+    assert buttons["✅ Иванов Иван"] == f"pk:ver:{bound.id}"
+    assert "Петров Пётр" in buttons
+    assert "✅ Петров Пётр" not in buttons
+
+
 async def verify(h: Harness, student_name_part: str, user_id: int) -> None:
     """Superadmin issues a link, the user follows it."""
     await h.click(SUPER, "s:ver")

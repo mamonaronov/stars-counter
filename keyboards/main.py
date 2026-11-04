@@ -132,6 +132,7 @@ def students_picker_kb(
     *,
     back: str | None = None,
     extra_rows: list[list[InlineKeyboardButton]] | None = None,
+    mark_verified: bool = False,
 ) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     extra = extra_rows or []
@@ -143,6 +144,8 @@ def students_picker_kb(
         name = truncate(student.full_name, 22 if not student.is_active else 32)
         if not student.is_active:
             name += " · удалён"
+        if mark_verified and student.is_verified:
+            name = f"✅ {name}"
         row.append(btn(name, f"pk:{ctx}:{student.id}"))
         if len(row) == 2:
             b.row(*row)

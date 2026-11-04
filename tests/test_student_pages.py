@@ -42,6 +42,18 @@ def _buttons(markup) -> list[tuple[str, str]]:
     return [(button.text, button.callback_data) for row in markup.inline_keyboard for button in row]
 
 
+def test_verification_picker_marks_verified_students():
+    plain = _student(1)
+    verified = _student(2)
+    verified.telegram_id = 50
+    buttons = dict(_buttons(students_picker_kb([plain, verified], "ver", 0, back="n:m", mark_verified=True)))
+    assert buttons["Студент 001"] == "pk:ver:1"
+    assert buttons["✅ Студент 002"] == "pk:ver:2"
+    unmarked = dict(_buttons(students_picker_kb([plain, verified], "stu", 0, back="s:stu")))
+    assert "Студент 002" in unmarked
+    assert "✅ Студент 002" not in unmarked
+
+
 def test_picker_shows_the_whole_group_without_a_pager():
     students = [_student(i) for i in range(1, 21)]
     buttons = _buttons(students_picker_kb(students, "stu", 0, back="s:stu"))

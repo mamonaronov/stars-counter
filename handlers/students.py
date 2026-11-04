@@ -12,12 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Config
 from database.models import Student
 from database.queries import Repo
-from handlers.common import (
-    PICK_FILTER_ONLY_UNVERIFIED,
-    require_level,
-    respond,
-    show_student_picker,
-)
+from handlers.common import require_level, respond, show_student_picker
 from keyboards.main import btn, cancel_kb, confirm_kb, fit_page, nav_row, pager_row
 from services.audit import audit
 from services.roles import LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor, role_title
@@ -966,9 +961,9 @@ async def open_verify(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: A
         state,
         repo,
         ctx=VERIFY_CTX,
-        title="🔗 <b>Верификация</b>\nВыберите студента, которому нужна ссылка (показаны только ещё не подтверждённые):",
+        title="🔗 <b>Верификация</b>\nВыберите студента, которому нужна ссылка. Подтверждённые отмечены ✅:",
         back=NAV_MAIN,
-        only=PICK_FILTER_ONLY_UNVERIFIED,
+        mark_verified=True,
     )
 
 

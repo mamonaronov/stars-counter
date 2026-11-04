@@ -124,7 +124,6 @@ def period_header(period: Period) -> str:
 # ------------------------------------------------------------ student picker
 
 PICK_FILTER_ONLY_VERIFIED = "verified"
-PICK_FILTER_ONLY_UNVERIFIED = "unverified"
 
 
 async def _picker_students(repo: Repo, data: dict) -> list[Student]:
@@ -133,8 +132,6 @@ async def _picker_students(repo: Repo, data: dict) -> list[Student]:
     only = data.get("pick_only")
     if only == PICK_FILTER_ONLY_VERIFIED:
         students = [s for s in students if s.is_verified]
-    elif only == PICK_FILTER_ONLY_UNVERIFIED:
-        students = [s for s in students if not s.is_verified]
     exclude = set(data.get("pick_exclude") or [])
     if exclude:
         students = [s for s in students if s.id not in exclude]
@@ -153,6 +150,7 @@ async def show_student_picker(
     only: str | None = None,
     exclude: list[int] | None = None,
     include_removed: bool = False,
+    mark_verified: bool = False,
     keep: dict | None = None,
 ) -> None:
     """Render the student list. A text message while in PickSG.filter narrows it."""
@@ -164,6 +162,7 @@ async def show_student_picker(
         pick_only=only,
         pick_exclude=exclude or [],
         pick_include_removed=include_removed,
+        pick_mark_verified=mark_verified,
         pick_query=None,
         **(keep or {}),
     )
@@ -181,7 +180,13 @@ async def render_student_picker(target: CallbackQuery | Message, state: FSMConte
     text += "Можно отправить часть фамилии сообщением, чтобы отфильтровать список."
     if not students:
         text += "\n\nНикого не найдено."
-    markup = students_picker_kb(students, data.get("pick_ctx", "x"), page, back=data.get("pick_back") or NAV_MAIN)
+    markup = students_picker_kb(
+        students,
+        data.get("pick_ctx", "x"),
+        page,
+        back=data.get("pick_back") or NAV_MAIN,
+        mark_verified=bool(data.get("pick_mark_verified")),
+    )
     await respond(target, text, markup)
 
 
