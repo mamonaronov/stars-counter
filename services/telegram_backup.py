@@ -16,8 +16,8 @@ import logging
 import os
 import re
 import shutil
-import tarfile
 import tempfile
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -273,7 +273,7 @@ def backup_archive_name(started: datetime, commit: str, title: str, db_version: 
     stamp = to_local(started, tz_name).strftime("%d-%m-%Y_%H-%M-%S")
     short = re.sub(r"[^A-Za-z0-9]", "", commit)[:12] or "unknown"
     slug = slugify_commit_title(title)
-    return f"stars-counter-backup_{stamp}_{short}_{slug}_db{db_version}.tgz"
+    return f"stars-counter-backup_{stamp}_{short}_{slug}_db{db_version}.zip"
 
 
 def _copy_item(src: Path, dest: Path) -> bool:
@@ -339,14 +339,14 @@ def collect_configs(staging: Path, root: Path) -> list[str]:
     return packed
 
 
-def write_tar_gzip(src_dir: Path, dest: Path) -> None:
+def write_zip(src_dir: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     try:
-        with tarfile.open(tmp, "w:gz") as tar:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             files = sorted(path for path in src_dir.rglob("*") if path.is_file())
             for path in files:
-                tar.add(path, arcname=path.relative_to(src_dir).as_posix())
+                archive.write(path, arcname=path.relative_to(src_dir).as_posix())
         tmp.replace(dest)
     except Exception:
         tmp.unlink(missing_ok=True)
@@ -372,7 +372,7 @@ async def create_telegram_archive(db: Database, config: Config) -> Path:
             commit,
             db_version,
         )
-        await asyncio.to_thread(write_tar_gzip, staging, archive_path)
+        await asyncio.to_thread(write_zip, staging, archive_path)
         return archive_path
     except Exception:
         archive_path.unlink(missing_ok=True)

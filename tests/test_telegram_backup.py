@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-import tarfile
+import zipfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -96,9 +96,9 @@ async def test_group_backup_skips_until_data_changes(repo: Repo, config: Config,
     assert len(bot.docs) == 1
     assert bot.docs[0]["chat_id"] == -100777
     assert bot.docs[0]["silent"] is True
-    assert bot.docs[0]["name"].endswith(".tgz")
-    with tarfile.open(fileobj=BytesIO(bot.docs[0]["payload"]), mode="r:gz") as archive:
-        names = archive.getnames()
+    assert bot.docs[0]["name"].endswith(".zip")
+    with zipfile.ZipFile(BytesIO(bot.docs[0]["payload"])) as archive:
+        names = archive.namelist()
     assert "database.sqlite3" in names
     assert ".env" in names
 
@@ -114,10 +114,8 @@ async def test_group_backup_skips_until_data_changes(repo: Repo, config: Config,
 
 
 def _sqlite_from_archive(payload: bytes, dest) -> sqlite3.Connection:
-    with tarfile.open(fileobj=BytesIO(payload), mode="r:gz") as archive:
-        member = archive.extractfile("database.sqlite3")
-        assert member is not None
-        dest.write_bytes(member.read())
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        dest.write_bytes(archive.read("database.sqlite3"))
     return sqlite3.connect(dest)
 
 
@@ -206,7 +204,7 @@ async def test_proxy_outage_retries_with_backoff_and_keeps_the_change(repo: Repo
     await telegram_backup_job(scheduler, repo.db, down, cfg)
     assert down.alerts == 1
     assert await repo.db.get_system(FINGERPRINT_KEY) is None
-    assert list(cfg.backup_path.glob("stars-counter-backup_*.tgz")) == []
+    assert list(cfg.backup_path.glob("stars-counter-backup_*.zip")) == []
     first = scheduler.jobs[-1]
     assert first["kwargs"]["retry_attempt"] == 1
     assert abs((first["run_date"] - started) - timedelta(minutes=1)) < timedelta(seconds=5)
