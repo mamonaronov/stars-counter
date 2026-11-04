@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
@@ -13,13 +14,13 @@ from database.database import Database
 from database.queries import Repo
 from services.alerts import format_alert, notify_alert
 from services.group_export import KEY_LAST_ERROR, publish_markers_export
+from utils.telegram import is_transient_telegram_error
 from utils.time import now_utc, to_iso
 from utils.timeouts import await_or_abandon
 
 logger = logging.getLogger(__name__)
 
 _TELEGRAM_BACKUP_START_DELAY = timedelta(seconds=20)
-_TELEGRAM_BACKUP_RETRY = timedelta(minutes=15)
 _VPN_MONITOR_JOB_SLACK = 5.0
 _VPN_RETENTION_EVERY = timedelta(minutes=15)
 _LOAD_SAMPLE_INTERVAL_SECONDS = 60
@@ -50,16 +51,24 @@ def _schedule_telegram_backup_at(
     db: Database,
     config: Config,
     when: datetime,
+    *,
+    retry_attempt: int = 0,
 ) -> None:
-    grace = max(3600, config.telegram_backup_interval_minutes * 60)
+    # None: a one-shot job still runs after a long stall, then schedules the next try.
     scheduler.add_job(
         telegram_backup_job,
         "date",
         run_date=when,
         id="telegram_backup",
         replace_existing=True,
-        kwargs={"scheduler": scheduler, "db": db, "bot": bot, "config": config},
-        misfire_grace_time=grace,
+        kwargs={
+            "scheduler": scheduler,
+            "db": db,
+            "bot": bot,
+            "config": config,
+            "retry_attempt": retry_attempt,
+        },
+        misfire_grace_time=None,
         next_run_time=when,
     )
 
@@ -161,13 +170,20 @@ async def backup_job(db: Database, bot: Bot, config: Config) -> None:
         await notify_alert(bot, config, format_alert("backup", "Не удалось сделать бэкап на диск", exc=exc))
 
 
-async def telegram_backup_job(scheduler: AsyncIOScheduler, db: Database, bot: Bot, config: Config) -> None:
+async def telegram_backup_job(
+    scheduler: AsyncIOScheduler,
+    db: Database,
+    bot: Bot,
+    config: Config,
+    retry_attempt: int = 0,
+) -> None:
     from services.telegram_backup import (
         last_telegram_backup_at,
         next_telegram_backup_at,
         send_telegram_backup,
         telegram_backup_chat,
         telegram_backup_due,
+        telegram_backup_retry_delay,
     )
 
     interval = config.telegram_backup_interval_minutes
@@ -189,13 +205,25 @@ async def telegram_backup_job(scheduler: AsyncIOScheduler, db: Database, bot: Bo
             when = now_utc() + timedelta(minutes=max(interval, 1))
         _schedule_telegram_backup_at(scheduler, bot, db, config, when)
     except Exception as exc:
-        logger.exception("Telegram backup failed")
-        await notify_alert(
-            bot,
-            config,
-            format_alert("telegram_backup", "Не удалось сделать или отправить бэкап в Telegram", exc=exc),
-        )
-        _schedule_telegram_backup_at(scheduler, bot, db, config, now_utc() + _TELEGRAM_BACKUP_RETRY)
+        delay = telegram_backup_retry_delay(retry_attempt)
+        if isinstance(exc, TelegramRetryAfter):
+            delay = max(delay, timedelta(seconds=int(exc.retry_after) + 1))
+        when = now_utc() + delay
+        if retry_attempt == 0 or not is_transient_telegram_error(exc):
+            logger.exception("Telegram backup failed, retry in %s", delay)
+            await notify_alert(
+                bot,
+                config,
+                format_alert("telegram_backup", "Не удалось сделать или отправить бэкап в Telegram", exc=exc),
+            )
+        else:
+            logger.warning(
+                "Telegram backup still failing (%s: %s), retry in %s",
+                type(exc).__name__,
+                exc,
+                delay,
+            )
+        _schedule_telegram_backup_at(scheduler, bot, db, config, when, retry_attempt=retry_attempt + 1)
 
 
 async def markers_export_job(repo: Repo, bot: Bot, config: Config) -> None:

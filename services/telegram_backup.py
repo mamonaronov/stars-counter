@@ -1,7 +1,10 @@
 """Pack the database, configs and .env, and send a silent backup to a bound group.
 
 The archive is sent at most once per interval, and only when stored data changed
-since the previous archive delivered to that group.
+since the previous archive delivered to that group. Any table counts, including
+student verification. Open dialogs, button de-duplication and last-seen times
+do not. A failed send is retried with exponential backoff; the success stamp is
+written only after Telegram accepts the file.
 """
 
 from __future__ import annotations
@@ -47,6 +50,14 @@ LAST_SENT_KEY = "last_telegram_backup_at"
 FINGERPRINT_KEY = "telegram_backup_fingerprint"
 CHAT_ID_KEY = "telegram_backup_chat_id"
 CHAT_TITLE_KEY = "telegram_backup_chat_title"
+# First retry waits a minute, then 2, 4, 8… and never longer than an hour.
+TELEGRAM_BACKUP_RETRY_INITIAL = timedelta(minutes=1)
+TELEGRAM_BACKUP_RETRY_MAX = timedelta(hours=1)
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Dialog state and one-shot callback ids change on every tap and are not data.
+_IGNORED_TABLES = frozenset({"fsm_storage", "callback_dedup"})
+# Opening the bot rewrites last_seen_at. That is not a reason to send an archive.
+_IGNORED_COLUMNS = {"users": frozenset({"last_seen_at"})}
 _VOLATILE_SYSTEM = (
     "last_backup_at",
     "last_backup_path",
@@ -57,17 +68,6 @@ _VOLATILE_SYSTEM = (
     "markers_export_message_id",
     "markers_export_last_error",
     MIGRATIONS_KEY,
-)
-_CONTENT_SQL = (
-    "SELECT telegram_id, username, first_name, last_name, first_seen_at FROM users ORDER BY telegram_id",
-    "SELECT * FROM students ORDER BY id",
-    "SELECT * FROM verification_links ORDER BY token",
-    "SELECT * FROM event_templates ORDER BY id",
-    "SELECT * FROM events ORDER BY id",
-    "SELECT * FROM attendance ORDER BY event_id, student_id",
-    "SELECT * FROM excuses ORDER BY id",
-    "SELECT * FROM requests ORDER BY id",
-    "SELECT * FROM audit_log ORDER BY id",
 )
 _ACTIVE_MEMBER = frozenset({"member", "administrator", "creator"})
 _GROUP_TYPES = frozenset({"group", "supergroup"})
@@ -100,6 +100,12 @@ def next_telegram_backup_at(
         return now
     due_at = last_sent + timedelta(minutes=interval_minutes)
     return now if now >= due_at else due_at
+
+
+def telegram_backup_retry_delay(attempt: int) -> timedelta:
+    """Pause before another try. ``attempt`` 0 is the first retry after a failure."""
+    step = min(max(int(attempt), 0), 20)
+    return min(TELEGRAM_BACKUP_RETRY_INITIAL * (2**step), TELEGRAM_BACKUP_RETRY_MAX)
 
 
 def next_backup_value(
@@ -214,21 +220,47 @@ async def clear_telegram_backup_chat(db: Database) -> None:
     await db.set_system(CHAT_TITLE_KEY, "")
 
 
+def _sql_ident(name: str) -> str:
+    if not _IDENT.fullmatch(name):
+        raise TelegramBackupError(f"Unexpected SQL name {name!r}")
+    return name
+
+
 async def content_fingerprint(db: Database) -> str:
-    """Hash of stored data. Bookkeeping timestamps and open dialogs are ignored."""
+    """Hash of stored data. Bookkeeping timestamps and open dialogs are ignored.
+
+    Every user table is included, so verification, roles, excuses and any later
+    table change the hash. A backup is not limited to lesson rows.
+    """
     digest = hashlib.sha256()
-    placeholders = ",".join("?" for _ in _VOLATILE_SYSTEM)
-    queries = (
-        *_CONTENT_SQL,
-        f"SELECT key, value FROM system_info WHERE key NOT IN ({placeholders}) ORDER BY key",
-    )
-    params: tuple = ()
     async with db.exclusive():
-        for sql in queries:
-            bind = _VOLATILE_SYSTEM if "system_info" in sql else params
+        async with db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ) as cur:
+            tables = [str(row[0]) for row in await cur.fetchall()]
+        for table in tables:
+            if table in _IGNORED_TABLES or not _IDENT.fullmatch(table):
+                continue
+            async with db.conn.execute(f"SELECT name FROM pragma_table_info('{_sql_ident(table)}') ORDER BY cid") as cur:
+                columns = [str(row[0]) for row in await cur.fetchall()]
+            ignored = _IGNORED_COLUMNS.get(table, frozenset())
+            columns = [name for name in columns if name not in ignored and _IDENT.fullmatch(name)]
+            if not columns:
+                continue
+            listed = ", ".join(_sql_ident(name) for name in columns)
+            if table == "system_info":
+                placeholders = ",".join("?" for _ in _VOLATILE_SYSTEM)
+                sql = f"SELECT {listed} FROM system_info WHERE key NOT IN ({placeholders}) ORDER BY rowid"
+                bind: tuple = _VOLATILE_SYSTEM
+            else:
+                sql = f"SELECT {listed} FROM {_sql_ident(table)} ORDER BY rowid"
+                bind = ()
             async with db.conn.execute(sql, bind) as cur:
                 rows = await cur.fetchall()
-            digest.update(sql.encode())
+            digest.update(table.encode())
+            digest.update(b"\0")
+            digest.update(",".join(columns).encode())
+            digest.update(b"\0")
             for row in rows:
                 digest.update(repr(tuple(row)).encode())
                 digest.update(b"\n")
@@ -403,10 +435,12 @@ async def send_telegram_backup(
             current, _title = await telegram_backup_chat(db)
             await clear_telegram_backup_chat(db)
             logger.warning("Backup group %s is gone, binding cleared", current if current is not None else dest)
-        logger.exception("Failed to send telegram backup %s, file kept at %s", path.name, path)
+        path.unlink(missing_ok=True)
+        logger.exception("Failed to send telegram backup %s", path.name)
         raise
     except Exception:
-        logger.exception("Failed to send telegram backup %s, file kept at %s", path.name, path)
+        path.unlink(missing_ok=True)
+        logger.exception("Failed to send telegram backup %s", path.name)
         raise
     path.unlink(missing_ok=True)
     if recording:
