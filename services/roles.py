@@ -1,12 +1,13 @@
 """Role hierarchy and permission checks.
 
 Levels:
-    5 superadmin     (SUPERADMIN_TELEGRAM_ID in .env) — everything
-    4 chief_admin    appoints admins, may hand over chief_admin
-    3 admin          appoints chief markers
-    2 chief_marker   appoints markers, manages students, may hand over chief_marker
-    1 marker         marks attendance, events, templates, excuses, reports
-    0 none           student or guest
+    6 superadmin        (SUPERADMIN_TELEGRAM_ID in .env) — everything
+    5 chief_admin       appoints admins, may hand over chief_admin
+    4 admin             appoints chief markers
+    3 chief_marker      appoints assigning markers, may hand over chief_marker
+    2 assigning_marker  many people; appoints markers, manages students
+    1 marker            marks attendance, events, templates, excuses, reports
+    0 none              student or guest
 
 Everyone at a higher level can do everything the lower levels can.
 A role can be assigned or revoked only by someone strictly above it.
@@ -20,12 +21,14 @@ from database.models import Student, User
 
 LEVEL_NONE = 0
 LEVEL_MARKER = 1
-LEVEL_CHIEF_MARKER = 2
-LEVEL_ADMIN = 3
-LEVEL_CHIEF_ADMIN = 4
-LEVEL_SUPERADMIN = 5
+LEVEL_ASSIGNING_MARKER = 2
+LEVEL_CHIEF_MARKER = 3
+LEVEL_ADMIN = 4
+LEVEL_CHIEF_ADMIN = 5
+LEVEL_SUPERADMIN = 6
 
 ROLE_MARKER = "marker"
+ROLE_ASSIGNING_MARKER = "assigning_marker"
 ROLE_CHIEF_MARKER = "chief_marker"
 ROLE_ADMIN = "admin"
 ROLE_CHIEF_ADMIN = "chief_admin"
@@ -33,6 +36,7 @@ ROLE_SUPERADMIN = "superadmin"
 
 ROLE_LEVELS: dict[str, int] = {
     ROLE_MARKER: LEVEL_MARKER,
+    ROLE_ASSIGNING_MARKER: LEVEL_ASSIGNING_MARKER,
     ROLE_CHIEF_MARKER: LEVEL_CHIEF_MARKER,
     ROLE_ADMIN: LEVEL_ADMIN,
     ROLE_CHIEF_ADMIN: LEVEL_CHIEF_ADMIN,
@@ -41,6 +45,7 @@ ROLE_LEVELS: dict[str, int] = {
 
 ROLE_TITLES: dict[str, str] = {
     ROLE_MARKER: "отмечающий",
+    ROLE_ASSIGNING_MARKER: "назначающий отмечающий",
     ROLE_CHIEF_MARKER: "главный отмечающий",
     ROLE_ADMIN: "админ",
     ROLE_CHIEF_ADMIN: "главный админ",
@@ -49,10 +54,11 @@ ROLE_TITLES: dict[str, str] = {
     "guest": "гость",
 }
 
-# Roles that exist as a single "chief" seat and can be handed over.
+# Unique seats that can be handed over. A former chief marker becomes a plain
+# marker, not an assigning marker.
 TRANSFERABLE_ROLES = {ROLE_CHIEF_MARKER: ROLE_MARKER, ROLE_CHIEF_ADMIN: ROLE_ADMIN}
 
-ASSIGNABLE_ROLES = (ROLE_MARKER, ROLE_CHIEF_MARKER, ROLE_ADMIN, ROLE_CHIEF_ADMIN)
+ASSIGNABLE_ROLES = (ROLE_MARKER, ROLE_ASSIGNING_MARKER, ROLE_CHIEF_MARKER, ROLE_ADMIN, ROLE_CHIEF_ADMIN)
 
 
 def role_level(role: str | None) -> int:
@@ -118,11 +124,11 @@ class Actor:
 
     @property
     def can_manage_students(self) -> bool:
-        return self.level >= LEVEL_CHIEF_MARKER
+        return self.level >= LEVEL_ASSIGNING_MARKER
 
     @property
     def can_manage_roles(self) -> bool:
-        return self.level >= LEVEL_CHIEF_MARKER
+        return self.level >= LEVEL_ASSIGNING_MARKER
 
     def can_assign(self, role: str) -> bool:
         if role not in ASSIGNABLE_ROLES:

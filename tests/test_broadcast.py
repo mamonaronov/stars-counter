@@ -33,10 +33,11 @@ def _person(telegram_id: int, card=None, *, superadmin: bool = False) -> Broadca
 def test_groups_are_a_union_and_all_replaces_them():
     pin = student(2, "Пин Пин", telegram_id=2, direction="ПИН", judaica_group="Алеф", track="молитва")
     marker = student(3, "Эк Эк", telegram_id=3, direction="ЭК", role="marker")
+    assigner = student(7, "Назначающий", telegram_id=7, role="assigning_marker")
     chief = student(8, "Главный", telegram_id=8, role="chief_marker")
     removed = student(4, "Удалён", telegram_id=4, direction="ПИН", status="removed")
     unverified = student(5, "Без телеграма", direction="ПИН")
-    catalog = audience_catalog([pin, marker, chief, removed, unverified])
+    catalog = audience_catalog([pin, marker, assigner, chief, removed, unverified])
     assert catalog.directions == ("ПИН", "ЭК")
     assert catalog.groups == ("Алеф",)
     assert catalog.tracks == ("молитва",)
@@ -47,18 +48,20 @@ def test_groups_are_a_union_and_all_replaces_them():
         _person(2, pin),
         _person(3, marker),
         _person(4, removed),
+        _person(7, assigner),
         _person(8, chief),
         _person(9, superadmin=True),
     ]
     assert broadcast_recipients(people, {"g", "d0"}, catalog) == [1, 2]
     assert broadcast_recipients(people, {"m"}, catalog) == [3]
+    assert broadcast_recipients(people, {"am"}, catalog) == [7]
     assert broadcast_recipients(people, {"cm"}, catalog) == [8]
     assert broadcast_recipients(people, {"s"}, catalog) == [2]
     assert broadcast_recipients(people, {"sa"}, catalog) == [9]
-    assert broadcast_recipients(people, {"y0"}, catalog) == [2, 3, 8]
+    assert broadcast_recipients(people, {"y0"}, catalog) == [2, 3, 7, 8]
     assert broadcast_recipients(people, {"j0"}, catalog) == [2]
     assert broadcast_recipients(people, {"t0"}, catalog) == [2]
-    assert broadcast_recipients(people, {"all"}, catalog, exclude=2) == [1, 3, 4, 8, 9]
+    assert broadcast_recipients(people, {"all"}, catalog, exclude=2) == [1, 3, 4, 7, 8, 9]
     assert broadcast_recipients(people, set(), catalog) == []
     assert broadcast_recipients(people, {"d9"}, catalog) == []
     assert selected_labels({"g", "d0"}, catalog) == ["Гости", "Направление: ПИН"]

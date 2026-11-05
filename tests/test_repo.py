@@ -201,6 +201,15 @@ async def test_verification_redeem_does_not_overwrite_another_account(repo: Repo
     assert (await repo.get_verification_link(foreign.token)).used_at is None
 
 
+async def test_assigning_marker_role_can_be_shared(repo: Repo):
+    first = await repo.create_student("Первый Назначающий", 2023, "2026-09-01", 1)
+    second = await repo.create_student("Второй Назначающий", 2023, "2026-09-01", 1)
+    await repo.set_role(first.id, "assigning_marker")
+    await repo.set_role(second.id, "assigning_marker")
+    assert (await repo.get_student(first.id)).role == "assigning_marker"
+    assert (await repo.get_student(second.id)).role == "assigning_marker"
+
+
 async def test_chief_role_is_unique_and_transfer_is_atomic(repo: Repo):
     chief = await repo.create_student("Главный Отмечающий", 2023, "2026-09-01", 1)
     marker = await repo.create_student("Обычный Отмечающий", 2023, "2026-09-01", 1)

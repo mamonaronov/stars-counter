@@ -14,7 +14,8 @@ from keyboards.main import btn, confirm_kb, nav_row
 from services.audit import audit
 from services.roles import (
     ASSIGNABLE_ROLES,
-    LEVEL_CHIEF_MARKER,
+    LEVEL_ASSIGNING_MARKER,
+    LEVEL_SUPERADMIN,
     ROLE_TITLES,
     Actor,
     role_after_transfer,
@@ -37,7 +38,7 @@ async def show_roles_home(target: CallbackQuery, repo: Repo, config: Config, act
     lines.append("1. суперадмин — задаётся в .env")
     for role in reversed(ASSIGNABLE_ROLES):
         names = [esc(s.full_name) for s in holders if s.role == role]
-        lines.append(f"{6 - role_level(role)}. {ROLE_TITLES[role]} — {', '.join(names) if names else '—'}")
+        lines.append(f"{LEVEL_SUPERADMIN + 1 - role_level(role)}. {ROLE_TITLES[role]} — {', '.join(names) if names else '—'}")
     lines.append("")
     lines.append(f"Ваш уровень: <b>{esc(actor.role_title)}</b>. Можно назначать: " + (", ".join(ROLE_TITLES[r] for r in actor.assignable_roles()) or "—") + ".")
     b = InlineKeyboardBuilder()
@@ -50,7 +51,7 @@ async def show_roles_home(target: CallbackQuery, repo: Repo, config: Config, act
 
 @router.callback_query(F.data == SEC_ROLES)
 async def open_roles(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     await state.clear()
@@ -59,7 +60,7 @@ async def open_roles(cb: CallbackQuery, state: FSMContext, repo: Repo, config: C
 
 @router.callback_query(F.data == "rolp")
 async def roles_pick(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     await show_student_picker(
@@ -95,7 +96,7 @@ async def show_role_card(cb: CallbackQuery, repo: Repo, actor: Actor, student_id
 
 @router.callback_query(F.data.startswith(f"pk:{PICK_CTX}:"))
 async def pick_for_role(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     await state.clear()
@@ -104,7 +105,7 @@ async def pick_for_role(cb: CallbackQuery, state: FSMContext, repo: Repo, actor:
 
 @router.callback_query(F.data.startswith("rola:"))
 async def assign_role(cb: CallbackQuery, repo: Repo, bot: Bot, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     _, raw_id, role = cb.data.split(":", 2)
@@ -129,7 +130,7 @@ async def assign_role(cb: CallbackQuery, repo: Repo, bot: Bot, actor: Actor | No
 
 @router.callback_query(F.data.startswith("rolr:"))
 async def revoke_role(cb: CallbackQuery, repo: Repo, bot: Bot, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     student = await repo.get_student(int(cb.data.split(":", 1)[1]))

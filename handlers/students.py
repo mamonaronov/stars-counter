@@ -15,7 +15,7 @@ from database.queries import Repo
 from handlers.common import require_level, respond, show_student_picker
 from keyboards.main import btn, cancel_kb, confirm_kb, fit_page, nav_row, pager_row
 from services.audit import audit
-from services.roles import LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor, role_title
+from services.roles import LEVEL_ASSIGNING_MARKER, LEVEL_MARKER, Actor, role_title
 
 PROTECTED_STUDENT = "Нельзя менять студента с такой же или более высокой ролью."
 from services.students import (
@@ -61,7 +61,7 @@ async def show_students_home(target: CallbackQuery | Message, repo: Repo) -> Non
 
 @router.callback_query(F.data == SEC_STUDENTS)
 async def open_students(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
     await show_students_home(cb, repo)
@@ -69,7 +69,7 @@ async def open_students(cb: CallbackQuery, state: FSMContext, repo: Repo, actor:
 
 @router.callback_query(F.data == "stul")
 async def students_list(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await show_student_picker(cb, state, repo, ctx=PICK_CTX, title="👥 <b>Студенты</b>\nВыберите студента:", back=SEC_STUDENTS)
 
@@ -126,7 +126,7 @@ async def show_student_card(target: CallbackQuery | Message, repo: Repo, config:
 
 @router.callback_query(F.data.startswith(f"pk:{PICK_CTX}:"))
 async def pick_student(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
     await show_student_card(cb, repo, config, int(cb.data.rsplit(":", 1)[1]))
@@ -134,7 +134,7 @@ async def pick_student(cb: CallbackQuery, state: FSMContext, repo: Repo, config:
 
 @router.callback_query(F.data.startswith("stc:"))
 async def student_card(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
     await show_student_card(cb, repo, config, int(cb.data.split(":", 1)[1]))
@@ -145,7 +145,7 @@ async def student_card(cb: CallbackQuery, state: FSMContext, repo: Repo, config:
 
 @router.callback_query(F.data == "stua")
 async def add_student_start(cb: CallbackQuery, state: FSMContext, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.set_state(StudentSG.add_name)
     await respond(cb, "ФИО студента? Например: <i>Иванов Иван Иванович</i>.", cancel_kb(SEC_STUDENTS))
@@ -193,7 +193,7 @@ async def _ask_enrollment_year(target: CallbackQuery | Message, state: FSMContex
 
 @router.callback_query(StudentSG.add_name, F.data == "stuf")
 async def add_student_force(cb: CallbackQuery, state: FSMContext, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     name = (await state.get_data()).get("new_name")
     if not name:
@@ -347,7 +347,7 @@ async def add_student_year(message: Message, state: FSMContext, repo: Repo) -> N
 
 @router.callback_query(StudentSG.add_direction, F.data.startswith("sad:"))
 async def add_direction_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     token = cb.data.split(":", 1)[1]
     if token == "skip":
@@ -377,7 +377,7 @@ async def add_direction_text(message: Message, state: FSMContext, repo: Repo) ->
 
 @router.callback_query(StudentSG.add_track, F.data.startswith("sat:"))
 async def add_track_btn(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     token = cb.data.split(":", 1)[1]
     if token == "skip":
@@ -407,7 +407,7 @@ async def add_track_text(message: Message, state: FSMContext, repo: Repo) -> Non
 
 @router.callback_query(StudentSG.add_group, F.data.startswith("sag:"))
 async def add_group_btn(cb: CallbackQuery, state: FSMContext, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     token = cb.data.split(":", 1)[1]
     if token == "skip":
@@ -436,7 +436,7 @@ async def add_group_text(message: Message, state: FSMContext, config: Config) ->
 
 
 async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: Repo, config: Config, actor: Actor, joined: date) -> None:
-    if not await require_level(target, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(target, actor, LEVEL_ASSIGNING_MARKER):
         await state.clear()
         return
     data = await state.get_data()
@@ -486,7 +486,7 @@ async def add_student_joined_text(message: Message, state: FSMContext, repo: Rep
 
 @router.callback_query(F.data == "stui")
 async def import_start(cb: CallbackQuery, state: FSMContext, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.set_state(StudentSG.import_text)
     await respond(
@@ -587,7 +587,7 @@ async def import_date(message: Message, state: FSMContext, config: Config) -> No
 
 @router.callback_query(StudentSG.import_text, F.data == "stic")
 async def import_confirm(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     data = await state.get_data()
@@ -617,7 +617,7 @@ async def import_confirm(cb: CallbackQuery, state: FSMContext, repo: Repo, confi
 
 @router.callback_query(F.data.startswith("ste:"))
 async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     _, field, raw_id = cb.data.split(":", 2)
@@ -691,7 +691,7 @@ async def _apply_student_edit(
     value,
     label: str,
 ) -> None:
-    if not await require_level(target, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(target, actor, LEVEL_ASSIGNING_MARKER):
         await state.clear()
         return
     data = await state.get_data()
@@ -834,7 +834,7 @@ async def edit_student_joined(message: Message, state: FSMContext, repo: Repo, c
 
 @router.callback_query(F.data.startswith("std:"))
 async def remove_student_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     student = await repo.get_student(int(cb.data.split(":", 1)[1]))
     if student is None:
@@ -851,7 +851,7 @@ async def remove_student_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None)
 
 @router.callback_query(F.data.startswith("stdc:"))
 async def remove_student(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     student = await repo.get_student(int(cb.data.split(":", 1)[1]))
@@ -886,7 +886,7 @@ async def show_removed(cb: CallbackQuery, repo: Repo, page: int) -> None:
 
 @router.callback_query(F.data == "stur")
 async def removed_students(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
     await show_removed(cb, repo, 0)
@@ -894,14 +894,14 @@ async def removed_students(cb: CallbackQuery, state: FSMContext, repo: Repo, act
 
 @router.callback_query(F.data.startswith("sturp:"))
 async def removed_students_page(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await show_removed(cb, repo, int(cb.data.split(":", 1)[1]))
 
 
 @router.callback_query(F.data.startswith("stre:"))
 async def restore_student(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
     assert actor is not None
@@ -916,7 +916,7 @@ async def restore_student(cb: CallbackQuery, state: FSMContext, repo: Repo, conf
 
 @router.callback_query(F.data.startswith("stunl:"))
 async def unlink_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     student = await repo.get_student(int(cb.data.split(":", 1)[1]))
     if student is None:
@@ -931,7 +931,7 @@ async def unlink_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None
 
 @router.callback_query(F.data.startswith("stunlc:"))
 async def unlink(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_CHIEF_MARKER):
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     assert actor is not None
     student = await repo.get_student(int(cb.data.split(":", 1)[1]))

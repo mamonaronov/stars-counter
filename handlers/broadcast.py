@@ -86,7 +86,7 @@ def _audience_text(selected: set[str], catalog: AudienceCatalog, people: list[Br
         "• <b>Все</b> — каждый, кто открывал бота.",
         "• <b>Гости</b> — открывали бота, но не привязаны к карточке студента.",
         "• <b>Студенты</b> — верифицированы и без роли.",
-        "• <b>Отмечающие</b>, <b>главные отмечающие</b>, <b>админы</b>, <b>главные админы</b>, <b>суперадмин</b> — только эта роль, без тех, кто выше.",
+        "• <b>Отмечающие</b>, <b>назначающие отмечающие</b>, <b>главные отмечающие</b>, <b>админы</b>, <b>главные админы</b>, <b>суперадмин</b> — только эта роль, без тех, кто выше.",
     ]
     profile_names = [PROFILE_TITLES[kind] for kind in PROFILE_KINDS if catalog.values(kind)]
     if profile_names:
@@ -116,9 +116,9 @@ def _audience_kb(selected: set[str], catalog: AudienceCatalog, people: list[Broa
     rows = (
         ("all",),
         ("g", "s"),
-        ("m", "cm"),
-        ("a", "ca"),
-        ("sa",),
+        ("m", "am"),
+        ("cm", "a"),
+        ("ca", "sa"),
     )
     for row in rows:
         b.row(

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from services.roles import (
     LEVEL_ADMIN,
+    LEVEL_ASSIGNING_MARKER,
     LEVEL_CHIEF_ADMIN,
     LEVEL_CHIEF_MARKER,
     LEVEL_MARKER,
     LEVEL_NONE,
     LEVEL_SUPERADMIN,
     ROLE_ADMIN,
+    ROLE_ASSIGNING_MARKER,
     ROLE_CHIEF_ADMIN,
     ROLE_CHIEF_MARKER,
     ROLE_MARKER,
@@ -20,6 +22,7 @@ from tests.conftest import actor, student
 def test_levels():
     assert actor(None).level == LEVEL_NONE
     assert actor(ROLE_MARKER).level == LEVEL_MARKER
+    assert actor(ROLE_ASSIGNING_MARKER).level == LEVEL_ASSIGNING_MARKER
     assert actor(ROLE_CHIEF_MARKER).level == LEVEL_CHIEF_MARKER
     assert actor(ROLE_ADMIN).level == LEVEL_ADMIN
     assert actor(ROLE_CHIEF_ADMIN).level == LEVEL_CHIEF_ADMIN
@@ -35,10 +38,17 @@ def test_removed_student_loses_rights():
 
 def test_assignable_roles_strictly_below():
     assert actor(ROLE_MARKER).assignable_roles() == []
-    assert actor(ROLE_CHIEF_MARKER).assignable_roles() == [ROLE_MARKER]
-    assert actor(ROLE_ADMIN).assignable_roles() == [ROLE_MARKER, ROLE_CHIEF_MARKER]
-    assert actor(ROLE_CHIEF_ADMIN).assignable_roles() == [ROLE_MARKER, ROLE_CHIEF_MARKER, ROLE_ADMIN]
-    assert actor(None, superadmin=True).assignable_roles() == [ROLE_MARKER, ROLE_CHIEF_MARKER, ROLE_ADMIN, ROLE_CHIEF_ADMIN]
+    assert actor(ROLE_ASSIGNING_MARKER).assignable_roles() == [ROLE_MARKER]
+    assert actor(ROLE_CHIEF_MARKER).assignable_roles() == [ROLE_MARKER, ROLE_ASSIGNING_MARKER]
+    assert actor(ROLE_ADMIN).assignable_roles() == [ROLE_MARKER, ROLE_ASSIGNING_MARKER, ROLE_CHIEF_MARKER]
+    assert actor(ROLE_CHIEF_ADMIN).assignable_roles() == [ROLE_MARKER, ROLE_ASSIGNING_MARKER, ROLE_CHIEF_MARKER, ROLE_ADMIN]
+    assert actor(None, superadmin=True).assignable_roles() == [
+        ROLE_MARKER,
+        ROLE_ASSIGNING_MARKER,
+        ROLE_CHIEF_MARKER,
+        ROLE_ADMIN,
+        ROLE_CHIEF_ADMIN,
+    ]
 
 
 def test_revoke_only_lower_levels_and_not_self():
@@ -75,8 +85,21 @@ def test_outranks_protects_higher_roles_and_superadmin():
     assert actor(None, superadmin=True).outranks(student(12, role=ROLE_ADMIN, telegram_id=6), 1)
 
 
+def test_assigning_marker_manages_students_and_only_markers():
+    assigner = actor(ROLE_ASSIGNING_MARKER, sid=10)
+    assert assigner.can_mark and assigner.can_manage_students and assigner.can_manage_roles
+    assert assigner.can_revoke(student(11, role=ROLE_MARKER))
+    assert not assigner.can_revoke(student(12, role=ROLE_ASSIGNING_MARKER))
+    assert not assigner.can_revoke(student(13, role=ROLE_CHIEF_MARKER))
+    assert not assigner.can_change_role_of(student(12, role=ROLE_ASSIGNING_MARKER))
+    assert assigner.transferable_role is None
+    assert actor(ROLE_CHIEF_MARKER, sid=20).can_revoke(student(12, role=ROLE_ASSIGNING_MARKER))
+
+
 def test_capabilities():
     assert not actor(None).can_mark
     assert actor(ROLE_MARKER).can_mark and not actor(ROLE_MARKER).can_manage_students
+    assert not actor(ROLE_MARKER).can_manage_roles
+    assert actor(ROLE_ASSIGNING_MARKER).can_manage_students
     assert actor(ROLE_CHIEF_MARKER).can_manage_students
     assert actor(None, superadmin=True).can_manage_roles

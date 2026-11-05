@@ -11,12 +11,13 @@ from dataclasses import dataclass
 
 from database.models import Student, User
 
-FIXED_ORDER = ("all", "g", "s", "m", "cm", "a", "ca", "sa")
+FIXED_ORDER = ("all", "g", "s", "m", "am", "cm", "a", "ca", "sa")
 FIXED_LABELS = {
     "all": "Все",
     "g": "Гости",
     "s": "Студенты",
     "m": "Отмечающие",
+    "am": "Назначающие отмечающие",
     "cm": "Главные отмечающие",
     "a": "Админы",
     "ca": "Главные админы",
@@ -31,6 +32,7 @@ PROFILE_TITLES = {
 }
 _ROLE_CODES = {
     "m": "marker",
+    "am": "assigning_marker",
     "cm": "chief_marker",
     "a": "admin",
     "ca": "chief_admin",

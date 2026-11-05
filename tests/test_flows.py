@@ -238,6 +238,7 @@ async def test_full_flow(h: Harness):
     await h.press(CHIEF, "Петров")
     labels = list(h.buttons())
     assert any("→ отмечающий" in l for l in labels) and not any("→ админ" in l for l in labels)
+    assert any("→ назначающий отмечающий" in l for l in labels)
     await h.press(CHIEF, "→ отмечающий")
     assert (await h.repo.get_student_by_telegram(MARKER)).role == "marker"
 

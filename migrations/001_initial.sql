@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS students (
     enrollment_year INTEGER,
     telegram_id INTEGER UNIQUE,
     verified_at TEXT,
-    role TEXT,                       -- marker | chief_marker | admin | chief_admin | NULL
+    role TEXT,                       -- marker | assigning_marker | chief_marker | admin | chief_admin | NULL
     joined_on TEXT NOT NULL,         -- events on/after this date count for the student
     left_on TEXT,                    -- set when the student is removed
     status TEXT NOT NULL DEFAULT 'active',  -- active | removed

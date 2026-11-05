@@ -13,7 +13,7 @@ from handlers.common import render_student_picker, respond, show_main
 from keyboards.main import back_kb
 from middlewares import build_actor
 from services.audit import audit
-from services.roles import LEVEL_ADMIN, LEVEL_CHIEF_ADMIN, LEVEL_CHIEF_MARKER, LEVEL_MARKER, Actor
+from services.roles import LEVEL_ADMIN, LEVEL_ASSIGNING_MARKER, LEVEL_CHIEF_ADMIN, LEVEL_MARKER, Actor
 from states import PickSG
 from utils.callbacks import NAV_CANCEL, NAV_MAIN, NOOP, SEC_AUTHOR, SEC_HELP
 from utils.formatting import esc
@@ -120,12 +120,12 @@ def help_text(actor: Actor | None) -> str:
             "все, гости, роли, направление, группа иудаики, молитва и год поступления. "
             "Сообщение получат все, кто входит хотя бы в одну выбранную группу.",
         ]
-    if level >= LEVEL_CHIEF_MARKER:
+    if level >= LEVEL_ASSIGNING_MARKER:
         parts += [
             "",
-            "<b>Главному отмечающему и выше</b>",
+            "<b>Назначающему отмечающему и выше</b>",
             "• <b>Студенты</b> — добавить по одному или списком («Иван Иванов, 2023» в каждой строке), изменить, удалить.",
-            "• <b>Роли</b> — назначить/снять роль тем, кто ниже вас; главные роли можно передать.",
+            "• <b>Роли</b> — назначить/снять роль тем, кто ниже вас. Назначающий отмечающий назначает отмечающих. Главные роли можно передать.",
         ]
     if level >= LEVEL_ADMIN:
         parts += [
