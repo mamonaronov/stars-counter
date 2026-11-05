@@ -961,16 +961,122 @@ async def open_verify(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: A
         state,
         repo,
         ctx=VERIFY_CTX,
-        title="🔗 <b>Верификация</b>\nВыберите студента, которому нужна ссылка. Подтверждённые отмечены ✅:",
+        title=(
+            "🔗 <b>Верификация</b>\n"
+            "Выберите студента. Подтверждённые отмечены ✅: нажмите, чтобы отвязать текущий Telegram и выдать новую ссылку."
+        ),
         back=NAV_MAIN,
         mark_verified=True,
     )
 
 
+def _can_rebind(actor: Actor, student: Student, superadmin_id: int) -> bool:
+    """A new link needs the old Telegram removed. Same and higher roles stay protected."""
+    if actor.student is not None and actor.student.id == student.id:
+        return False
+    return actor.outranks(student, superadmin_id)
+
+
 @router.callback_query(F.data.startswith(f"pk:{VERIFY_CTX}:"))
-async def verify_pick(cb: CallbackQuery, state: FSMContext, repo: Repo, bot: Bot, actor: Actor | None) -> None:
+async def verify_pick(cb: CallbackQuery, state: FSMContext, repo: Repo, config: Config, bot: Bot, actor: Actor | None) -> None:
     await state.clear()
-    await issue_link(cb, repo, bot, actor, int(cb.data.rsplit(":", 1)[1]))
+    student_id = int(cb.data.rsplit(":", 1)[1])
+    student = await repo.get_student(student_id)
+    if student is not None and student.is_active and student.is_verified:
+        await show_verified_rebind(cb, repo, config, actor, student)
+        return
+    await issue_link(cb, repo, bot, actor, student_id)
+
+
+async def show_verified_rebind(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None, student: Student) -> None:
+    if not await require_level(cb, actor):
+        return
+    assert actor is not None
+    user = await repo.get_user(student.telegram_id) if student.telegram_id else None
+    telegram = user.display if user else str(student.telegram_id)
+    lines = [
+        f"🔗 <b>{esc(student.full_name)}</b> уже подтверждён",
+        "",
+        f"Telegram: {esc(telegram)}",
+        f"Роль: {esc(role_title(student.role))}",
+        "",
+        "Чтобы привязать другой аккаунт, отвяжите текущий. Роль снимется. "
+        "Посещаемость и остальные записи останутся на этой карточке. После отвязки бот сразу даст новую ссылку.",
+    ]
+    b = InlineKeyboardBuilder()
+    if _can_rebind(actor, student, config.superadmin_id):
+        b.row(btn("🔓 Отвязать и выдать ссылку", f"vra:{student.id}"))
+    elif actor.student is not None and actor.student.id == student.id:
+        lines.append("")
+        lines.append("Себя отвязать нельзя.")
+    else:
+        lines.append("")
+        lines.append("Отвязать может тот, кто выше по роли.")
+    b.row(*nav_row(SEC_VERIFY))
+    await respond(cb, "\n".join(lines), b.as_markup())
+
+
+@router.callback_query(F.data.startswith("vrb:"))
+async def rebind_screen(cb: CallbackQuery, repo: Repo, config: Config, bot: Bot, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    student = await repo.get_student(int(cb.data.split(":", 1)[1]))
+    if student is None or not student.is_active:
+        await answer_callback(cb, "Студент не найден", show_alert=True)
+        return
+    if not student.is_verified:
+        await issue_link(cb, repo, bot, actor, student.id)
+        return
+    await show_verified_rebind(cb, repo, config, actor, student)
+
+
+@router.callback_query(F.data.startswith("vra:"))
+async def rebind_ask(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    assert actor is not None
+    student = await repo.get_student(int(cb.data.split(":", 1)[1]))
+    if student is None or not student.is_active or not student.is_verified:
+        await answer_callback(cb, "Студент уже не привязан", show_alert=True)
+        return
+    if not _can_rebind(actor, student, config.superadmin_id):
+        await answer_callback(cb, "Нельзя отвязать этого студента.", show_alert=True)
+        return
+    await respond(
+        cb,
+        f"Отвязать Telegram от <b>{esc(student.full_name)}</b> и выдать новую ссылку?\n\n"
+        "Роль будет снята. Старый аккаунт потеряет доступ к карточке.",
+        confirm_kb(f"vrc:{student.id}", f"vrb:{student.id}", yes_text="🔓 Отвязать"),
+    )
+
+
+@router.callback_query(F.data.startswith("vrc:"))
+async def rebind_confirm(cb: CallbackQuery, repo: Repo, config: Config, bot: Bot, actor: Actor | None) -> None:
+    if not await require_level(cb, actor):
+        return
+    assert actor is not None
+    student = await repo.get_student(int(cb.data.split(":", 1)[1]))
+    if student is None or not student.is_active:
+        await answer_callback(cb, "Студент не найден", show_alert=True)
+        return
+    if not student.is_verified:
+        await issue_link(cb, repo, bot, actor, student.id)
+        return
+    if not _can_rebind(actor, student, config.superadmin_id):
+        await answer_callback(cb, "Нельзя отвязать этого студента.", show_alert=True)
+        return
+    old_telegram = student.telegram_id
+    await repo.unbind_telegram(student.id)
+    await audit(
+        repo,
+        actor,
+        "student.unlink",
+        entity_type="student",
+        entity_id=student.id,
+        студент=student.full_name,
+        telegram_id=old_telegram,
+    )
+    await issue_link(cb, repo, bot, actor, student.id)
 
 
 @router.callback_query(F.data.startswith("verl:"))

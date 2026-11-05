@@ -28,6 +28,40 @@ async def h(tmp_path):
         await db.close()
 
 
+async def test_verified_student_can_be_rebound_from_verification(h: Harness):
+    plain = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
+    higher = await h.repo.create_student("Админ Админович", 2023, "2026-09-01", SUPER)
+    marker = await h.repo.create_student("Отмечающий Марк", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(plain.id, 50)
+    await h.repo.bind_telegram(higher.id, 51)
+    await h.repo.bind_telegram(marker.id, MARKER)
+    await h.repo.set_role(higher.id, "admin")
+    await h.repo.set_role(marker.id, "marker")
+
+    await h.text(MARKER, "/start")
+    await h.click(MARKER, "s:ver")
+    await h.press(MARKER, "Иванов")
+    assert "уже подтверждён" in h.last_text()
+    assert any("Отвязать и выдать ссылку" in label for label in h.buttons())
+    await h.press(MARKER, "Отвязать и выдать ссылку")
+    await h.press(MARKER, "🔓 Отвязать")
+    assert "start=v_" in h.last_text()
+    rebound = await h.repo.get_student(plain.id)
+    assert rebound.telegram_id is None
+    assert rebound.role is None
+
+    await h.click(MARKER, "s:ver")
+    await h.press(MARKER, "Админ")
+    assert "выше по роли" in h.last_text()
+    assert not any("Отвязать и выдать ссылку" in label for label in h.buttons())
+    assert (await h.repo.get_student(higher.id)).telegram_id == 51
+
+    await h.click(MARKER, "s:ver")
+    await h.press(MARKER, "Отмечающий Марк")
+    assert "Себя отвязать нельзя" in h.last_text()
+    assert (await h.repo.get_student(marker.id)).telegram_id == MARKER
+
+
 async def test_verification_list_marks_verified_students(h: Harness):
     bound = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
     await h.repo.bind_telegram(bound.id, 50)
