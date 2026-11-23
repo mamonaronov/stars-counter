@@ -274,6 +274,15 @@ class Repo:
     async def get_user(self, telegram_id: int) -> User | None:
         return _opt(User, await self._fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)))
 
+    async def find_users_by_username(self, username: str) -> list[User]:
+        needle = username.strip().lstrip("@")
+        if not needle:
+            return []
+        return _many(
+            User,
+            await self._fetchall("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (needle,)),
+        )
+
     async def list_users(self) -> list[User]:
         return _many(User, await self._fetchall("SELECT * FROM users"))
 

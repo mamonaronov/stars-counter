@@ -76,3 +76,7 @@ class BroadcastSG(StatesGroup):
 
 class LogsSG(StatesGroup):
     since = State()
+
+
+class LookupSG(StatesGroup):
+    query = State()

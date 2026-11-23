@@ -11,6 +11,7 @@ from handlers import (
     events,
     excuses,
     fallback,
+    lookup,
     months,
     requests,
     roles,
@@ -34,6 +35,7 @@ def setup_routers() -> Router:
     root.include_router(requests.router)
     root.include_router(excuses.router)
     root.include_router(students.router)
+    root.include_router(lookup.router)
     root.include_router(roles.router)
     root.include_router(audit.router)
     root.include_router(broadcast.router)

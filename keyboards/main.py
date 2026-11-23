@@ -30,6 +30,7 @@ from utils.callbacks import (
     SEC_REQUESTS,
     SEC_ROLES,
     SEC_SERVICE,
+    SEC_LOOKUP,
     SEC_STUDENTS,
     SEC_USAGE,
     SEC_WIPE,
@@ -113,7 +114,7 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
             b.row(btn("👥 Студенты", SEC_STUDENTS), btn("🕵️ Журнал действий", SEC_AUDIT))
         else:
             b.row(btn("🕵️ Журнал действий", SEC_AUDIT))
-        b.row(btn("📢 Сообщение", SEC_BROADCAST))
+        b.row(btn("📢 Сообщение", SEC_BROADCAST), btn("🔎 Ник и ФИО", SEC_LOOKUP))
     else:
         b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS))
     if level >= LEVEL_ASSIGNING_MARKER:
