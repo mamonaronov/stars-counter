@@ -62,6 +62,41 @@ async def test_verified_student_can_be_rebound_from_verification(h: Harness):
     assert (await h.repo.get_student(marker.id)).telegram_id == MARKER
 
 
+async def test_admin_and_above_can_unlink_themselves(h: Harness):
+    admin = await h.repo.create_student("Админ Админович", 2023, "2026-09-01", SUPER)
+    chief = await h.repo.create_student("Главный Отмечающий", 2023, "2026-09-01", SUPER)
+    own = await h.repo.create_student("Тип Ровный", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(admin.id, 51)
+    await h.repo.bind_telegram(chief.id, 52)
+    await h.repo.bind_telegram(own.id, SUPER)
+    await h.repo.set_role(admin.id, "admin")
+    await h.repo.set_role(chief.id, "chief_marker")
+
+    await h.text(52, "/start")
+    await h.click(52, "s:ver")
+    await h.press(52, "Главный")
+    assert "Себя отвязать нельзя" in h.last_text()
+    assert (await h.repo.get_student(chief.id)).telegram_id == 52
+
+    await h.text(51, "/start")
+    await h.click(51, "s:ver")
+    await h.press(51, "Админ")
+    await h.press(51, "Отвязать и выдать ссылку")
+    await h.press(51, "🔓 Отвязать")
+    assert "start=v_" in h.last_text()
+    rebound = await h.repo.get_student(admin.id)
+    assert rebound.telegram_id is None
+    assert rebound.role is None
+
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, "s:ver")
+    await h.press(SUPER, "Тип")
+    assert "Себя отвязать нельзя" not in h.last_text()
+    await h.press(SUPER, "Отвязать и выдать ссылку")
+    await h.press(SUPER, "🔓 Отвязать")
+    assert (await h.repo.get_student(own.id)).telegram_id is None
+
+
 async def test_verification_list_marks_verified_students(h: Harness):
     bound = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
     await h.repo.bind_telegram(bound.id, 50)

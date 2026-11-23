@@ -15,7 +15,7 @@ from database.queries import Repo
 from handlers.common import require_level, respond, show_student_picker
 from keyboards.main import btn, cancel_kb, confirm_kb, fit_page, nav_row, pager_row
 from services.audit import audit
-from services.roles import LEVEL_ASSIGNING_MARKER, LEVEL_MARKER, Actor, role_title
+from services.roles import LEVEL_ADMIN, LEVEL_ASSIGNING_MARKER, LEVEL_MARKER, Actor, role_title
 
 PROTECTED_STUDENT = "Нельзя менять студента с такой же или более высокой ролью."
 from services.students import (
@@ -938,7 +938,7 @@ async def unlink(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | N
     if student is None:
         await answer_callback(cb, "Студент не найден", show_alert=True)
         return
-    if actor.student is not None and actor.student.id == student.id:
+    if actor.student is not None and actor.student.id == student.id and actor.level < LEVEL_ADMIN:
         await answer_callback(cb, "Нельзя отвязать самого себя.", show_alert=True)
         return
     if not actor.outranks(student, config.superadmin_id):
@@ -971,8 +971,11 @@ async def open_verify(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: A
 
 
 def _can_rebind(actor: Actor, student: Student, superadmin_id: int) -> bool:
-    """A new link needs the old Telegram removed. Same and higher roles stay protected."""
-    if actor.student is not None and actor.student.id == student.id:
+    """A new link needs the old Telegram removed. Same and higher roles stay protected.
+
+    Admins and above may unlink their own card. Lower roles cannot.
+    """
+    if actor.student is not None and actor.student.id == student.id and actor.level < LEVEL_ADMIN:
         return False
     return actor.outranks(student, superadmin_id)
 
