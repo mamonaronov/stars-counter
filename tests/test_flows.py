@@ -658,6 +658,49 @@ async def test_month_end_cannot_jump_over_a_period(h: Harness):
     assert (await h.repo.get_event(november.id)).month_title == "Ноябрь 2026"
 
 
+async def test_my_attendance_opens_the_current_month(h: Harness):
+    student = await h.repo.create_student("Сидоров Сидор", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(student.id, STUDENT)
+    september = await h.repo.create_event("Лекция", "mandatory", "2026-09-01", "10:00", None, SUPER)
+    october = await h.repo.create_event("Семинар", "mandatory", "2026-10-02", "10:00", None, SUPER)
+    await h.repo.update_event(september.id, closes_month=1, month_title="Сентябрь 2026")
+    await h.repo.set_presence(october.id, student.id, True, SUPER)
+
+    await h.text(STUDENT, "/start")
+    assert "📅 Прошлый месяц" not in h.buttons()
+    await h.click(STUDENT, "s:my")
+    assert "Текущий: Октябрь 2026" in h.last_text()
+    assert "Семинар" in h.last_text()
+    assert "<b>100,00%</b>" in h.last_text()
+    assert "Лекция" not in h.last_text()
+    assert list(h.buttons()) == ["📆 Все месяцы", "📅 Прошлый", "🏠 Меню"]
+
+    await h.press(STUDENT, "Прошлый")
+    assert "Сентябрь 2026" in h.last_text()
+    assert "Лекция" in h.last_text()
+    assert "Семинар" not in h.last_text()
+    assert list(h.buttons()) == ["📆 Все месяцы", "📅 Текущий", "🏠 Меню"]
+    await h.press(STUDENT, "Текущий")
+    assert "Семинар" in h.last_text()
+
+    await h.press(STUDENT, "Все месяцы")
+    assert "Выберите месяц" in h.last_text()
+    await h.press(STUDENT, "Сентябрь 2026")
+    assert "Лекция" in h.last_text()
+    assert list(h.buttons()) == ["📆 Все месяцы", "📅 Текущий", "🏠 Меню"]
+
+
+async def test_previous_month_button_without_a_closed_month(h: Harness):
+    student = await h.repo.create_student("Сидоров Сидор", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(student.id, STUDENT)
+    await h.repo.create_event("Семинар", "mandatory", "2026-10-02", "10:00", None, SUPER)
+    await h.text(STUDENT, "/start")
+    assert "📅 Прошлый месяц" not in h.buttons()
+    await h.click(STUDENT, "s:my")
+    await h.press(STUDENT, "Прошлый")
+    assert h.session.last("AnswerCallbackQuery").text == "Прошлого месяца ещё нет."
+
+
 async def test_removed_student_keeps_own_attendance(h: Harness):
     student = await h.repo.create_student("Бывший Борис", 2023, "2026-09-01", SUPER)
     await h.repo.bind_telegram(student.id, STUDENT)

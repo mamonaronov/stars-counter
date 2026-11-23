@@ -7,6 +7,7 @@ NOOP = "noop"
 # sections
 SEC_ATTENDANCE = "s:att"
 SEC_MY = "s:my"
+SEC_MY_PREV = "s:myp"
 SEC_EVENTS = "s:ev"
 SEC_NEW_EVENT = "s:new"
 SEC_TEMPLATES = "s:tpl"
