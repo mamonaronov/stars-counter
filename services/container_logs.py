@@ -1,7 +1,11 @@
-"""Logs of the bot and mihomo containers since each one's last start.
+"""Logs of the bot and mihomo containers, including earlier starts.
 
-The text matches `docker compose logs`: every line is prefixed with the
-container name. The Docker engine is reached through its unix socket.
+Docker keeps the json-file history of the current container across restarts.
+Every line is prefixed with the container name and a timestamp, as in
+`docker compose logs -t`. A request can take the whole journal, one run
+(the current process, the previous one, or the one before that), or every
+line from a chosen moment until now. The engine is reached through its unix
+socket. A container that was removed and created again has no older history.
 """
 
 from __future__ import annotations
@@ -14,13 +18,13 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
 
 from config import Config
-from utils.time import format_dt, now_utc, to_local
+from utils.time import format_dt, now_utc, parse_date_text, to_local, zone
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,24 @@ class DockerContainerNotFound(DockerError):
         self.name = name
 
 
+class LogSpanMissing(DockerError):
+    """The saved journal does not contain the requested run or period."""
+
+
+# A new process writes one of these once. They separate runs inside one journal:
+# Docker stores a single StartedAt, and a quiet process can go hours without a line.
+RUN_MARKERS: tuple[str, ...] = (
+    "Starting attendance bot",
+    "Start initial compatible provider",
+)
+
+_MISSING_SPAN = {
+    "current": "в сохранённом журнале нет строк текущего запуска",
+    "previous": "в сохранённом журнале нет прошлого запуска",
+    "before_previous": "в сохранённом журнале нет позапрошлого запуска",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ContainerLogFile:
     name: str
@@ -52,6 +74,23 @@ class ContainerLogFile:
     part: int = 1
     parts: int = 1
     error: str | None = None
+    scope: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LogQuery:
+    """Which part of the saved journal to send. `all` keeps every retained line."""
+
+    mode: str = "all"
+    since: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LogRun:
+    text: str
+    started_at: datetime | None
+    ended_at: datetime | None
+    current: bool = False
 
 
 def parse_started_at(value: str) -> datetime:
@@ -67,8 +106,166 @@ def parse_started_at(value: str) -> datetime:
 
 
 def started_since(value: str) -> str:
-    """Unix seconds for the Docker logs `since` query. Earlier lines are dropped."""
+    """Unix seconds of a container start. Kept for callers that still format it."""
     return str(int(parse_started_at(value).timestamp()))
+
+
+def parse_log_since(value: str, tz_name: str, *, today: date | None = None) -> datetime:
+    """A local date, optionally with a time, as the UTC start of a log slice."""
+    raw = " ".join((value or "").split())
+    time_match = re.fullmatch(r"(.+?)[ T](\d{1,2}):(\d{2})(?::(\d{2}))?", raw)
+    try:
+        if time_match:
+            day = parse_date_text(time_match.group(1), today=today)
+            hour = int(time_match.group(2))
+            minute = int(time_match.group(3))
+            second = int(time_match.group(4) or 0)
+            if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+                raise ValueError("time")
+        else:
+            day = parse_date_text(raw, today=today)
+            hour = minute = second = 0
+    except ValueError as exc:
+        raise ValueError("date") from exc
+    local = datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=zone(tz_name))
+    return local.astimezone(timezone.utc)
+
+
+def split_log_runs(
+    text: str,
+    *,
+    started_at: datetime | None,
+    markers: tuple[str, ...] = RUN_MARKERS,
+) -> list[LogRun]:
+    """Split a timestamped journal into process runs, oldest first.
+
+    A run starts at a startup marker or at the first line of the process Docker
+    currently reports as running. Lines without a timestamp stay with the run
+    that precedes them. The last run is marked current only when the journal
+    actually reaches the running process.
+    """
+    chunks: list[list[str]] = []
+    buf: list[str] = []
+    current_opened = False
+    # Docker's StartedAt and the first log line can disagree by a fraction of a second.
+    current_from = started_at - timedelta(seconds=1) if started_at is not None else None
+
+    def flush() -> None:
+        nonlocal buf
+        if any(line.strip() for line in buf):
+            chunks.append(buf)
+        buf = []
+
+    for line in text.splitlines():
+        stamped, rest = _split_stamp(line)
+        marker = any(marker in rest for marker in markers)
+        enters_current = (
+            not current_opened
+            and current_from is not None
+            and stamped is not None
+            and stamped >= current_from
+            and bool(buf)
+        )
+        if (marker or enters_current) and buf:
+            flush()
+        if enters_current or (current_from is not None and stamped is not None and stamped >= current_from):
+            current_opened = True
+        buf.append(line)
+    flush()
+    runs = [_run_from_lines(lines) for lines in chunks]
+    if not runs:
+        return []
+    has_current = started_at is None or current_opened or runs[-1].ended_at is None
+    if not has_current:
+        return runs
+    last = runs[-1]
+    runs[-1] = LogRun(last.text, last.started_at, last.ended_at, current=True)
+    return runs
+
+
+def filter_log_since(text: str, since: datetime) -> str:
+    """Lines at or after `since`. A line without a timestamp follows the previous one."""
+    kept: list[str] = []
+    keep = False
+    for line in text.splitlines():
+        stamped, _rest = _split_stamp(line)
+        if stamped is not None:
+            keep = stamped >= since
+        if keep:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def query_label(query: LogQuery, tz_name: str) -> str:
+    if query.mode == "since" and query.since is not None:
+        return f"с {format_dt(query.since, tz_name)} до сейчас"
+    return {
+        "all": "все сохранённые",
+        "current": "текущий запуск",
+        "previous": "прошлый запуск",
+        "before_previous": "позапрошлый запуск",
+    }.get(query.mode, query.mode)
+
+
+def _split_stamp(line: str) -> tuple[datetime | None, str]:
+    head, sep, rest = line.partition(" ")
+    if not sep:
+        return None, line
+    try:
+        return parse_started_at(head), rest
+    except DockerError:
+        return None, line
+
+
+def _run_from_lines(lines: list[str]) -> LogRun:
+    stamps = [stamped for stamped, _rest in (_split_stamp(line) for line in lines) if stamped is not None]
+    return LogRun("\n".join(lines), stamps[0] if stamps else None, stamps[-1] if stamps else None)
+
+
+def _scope_label(mode: str, run: LogRun, tz_name: str) -> str:
+    start = format_dt(run.started_at, tz_name) if run.started_at else "—"
+    end = format_dt(run.ended_at, tz_name) if run.ended_at else "—"
+    if mode == "current":
+        return f"текущий запуск с {start}"
+    if mode == "previous":
+        return f"прошлый запуск {start} — {end}"
+    return f"позапрошлый запуск {start} — {end}"
+
+
+def _pick_run(runs: list[LogRun], mode: str) -> LogRun:
+    current_at = next((index for index, run in enumerate(runs) if run.current), None)
+    if mode == "current":
+        if current_at is None:
+            raise LogSpanMissing(_MISSING_SPAN[mode])
+        return runs[current_at]
+    past = runs[:current_at] if current_at is not None else runs
+    offset = -1 if mode == "previous" else -2
+    if len(past) < abs(offset):
+        raise LogSpanMissing(_MISSING_SPAN[mode])
+    return past[offset]
+
+
+def apply_log_query(
+    text: str,
+    *,
+    started_at: datetime | None,
+    query: LogQuery,
+    tz_name: str,
+) -> tuple[str, str | None, datetime | None]:
+    """Return the selected text, its caption scope, and the time shown as the start."""
+    if query.mode == "all":
+        return text, None, started_at
+    if query.mode == "since":
+        if query.since is None:
+            raise DockerError("не указана дата начала")
+        body = filter_log_since(text, query.since)
+        if not body.strip():
+            raise LogSpanMissing(f"С {format_dt(query.since, tz_name)} в журнале нет строк.")
+        return body, f"с {format_dt(query.since, tz_name)} до сейчас", query.since
+    if query.mode not in _MISSING_SPAN:
+        raise DockerError("не понял, какой запуск нужен")
+    run = _pick_run(split_log_runs(text, started_at=started_at), query.mode)
+    return run.text, _scope_label(query.mode, run, tz_name), run.started_at or started_at
 
 
 class _LogBuffer:
@@ -124,7 +321,7 @@ def decode_docker_logs(raw: bytes) -> str:
 
 def compose_log_text(container: str, text: str) -> str:
     prefix = f"{container}  | "
-    lines = text.splitlines() or ["(нет строк с момента запуска)"]
+    lines = text.splitlines() or ["(нет сохранённых строк)"]
     return "".join(f"{prefix}{line}\n" for line in lines)
 
 
@@ -152,8 +349,8 @@ class DockerEngine:
             raise DockerError(f"Docker не отдал сведения о {name} ({status})")
         return payload
 
-    async def logs(self, name: str, since: str) -> str:
-        params = {"stdout": "1", "stderr": "1", "since": since}
+    async def logs(self, name: str) -> str:
+        params = {"stdout": "1", "stderr": "1", "timestamps": "1"}
         status, text = await self._stream("GET", f"/containers/{name}/logs", params=params, timeout=120)
         if status == 404:
             raise DockerContainerNotFound(name)
@@ -290,6 +487,7 @@ def _one(
     error: str | None,
     part: int = 1,
     parts: int = 1,
+    scope: str | None = None,
 ) -> ContainerLogFile:
     return ContainerLogFile(
         name=name,
@@ -299,6 +497,7 @@ def _one(
         part=part,
         parts=parts,
         error=error,
+        scope=scope,
     )
 
 
@@ -309,6 +508,7 @@ async def _package(
     started: datetime | None,
     error: str | None,
     tz_name: str,
+    scope: str | None = None,
 ) -> list[ContainerLogFile]:
     filename = log_filename(name, now_utc(), tz_name)
     if error is not None:
@@ -316,45 +516,65 @@ async def _package(
         return [_one(name, body, filename, started=started, error=error)]
     body = compose_log_text(name, text).encode("utf-8")
     if len(body) <= _MAX_BYTES:
-        return [_one(name, body, filename, started=started, error=None)]
+        return [_one(name, body, filename, started=started, error=None, scope=scope)]
     volumes = await asyncio.to_thread(write_split_zip, body, filename, _MAX_BYTES)
     total = len(volumes)
     return [
-        _one(name, payload, volume_name, started=started, error=None, part=index, parts=total)
+        _one(name, payload, volume_name, started=started, error=None, part=index, parts=total, scope=scope)
         for index, (volume_name, payload) in enumerate(volumes, start=1)
     ]
 
 
-async def read_runtime_logs(config: Config, engine: DockerEngine | None = None) -> list[ContainerLogFile]:
+async def read_runtime_logs(
+    config: Config,
+    engine: DockerEngine | None = None,
+    *,
+    query: LogQuery | None = None,
+) -> list[ContainerLogFile]:
     client = engine or DockerEngine(config.docker_socket)
     await client.ensure()
+    selected = query or LogQuery()
     names = (config.bot_container_name, config.mihomo_container_name)
     files: list[ContainerLogFile] = []
     for name in names:
-        files.extend(await _read_one(client, name, config.timezone))
+        files.extend(await _read_one(client, name, config.timezone, selected))
     return files
 
 
-async def _read_one(engine: DockerEngine, name: str, tz_name: str) -> list[ContainerLogFile]:
+async def _read_one(
+    engine: DockerEngine,
+    name: str,
+    tz_name: str,
+    query: LogQuery,
+) -> list[ContainerLogFile]:
     try:
         info = await engine.inspect(name)
         started_raw = str((info.get("State") or {}).get("StartedAt") or "")
         started = parse_started_at(started_raw) if started_raw else None
-        since = started_since(started_raw) if started_raw else "0"
-        text = await engine.logs(name, since)
+        text = await engine.logs(name)
+        body, scope, shown_start = apply_log_query(text, started_at=started, query=query, tz_name=tz_name)
     except DockerContainerNotFound:
         return await _package(name, "", started=None, error=f"контейнер {name} не найден", tz_name=tz_name)
+    except LogSpanMissing as exc:
+        return await _package(name, "", started=None, error=str(exc), tz_name=tz_name)
     except DockerError as exc:
         logger.warning("Container logs for %s failed: %s", name, exc)
         return await _package(name, "", started=None, error=str(exc), tz_name=tz_name)
-    return await _package(name, text, started=started, error=None, tz_name=tz_name)
+    return await _package(name, body, started=shown_start, error=None, tz_name=tz_name, scope=scope)
 
 
 def log_caption(item: ContainerLogFile, tz_name: str) -> str:
     if item.error:
         return f"📋 {item.name}\n{item.error}"
     when = format_dt(item.started_at, tz_name) if item.started_at else "—"
-    lines = [f"📋 {item.name}", f"с запуска контейнера: {when}"]
+    if item.scope:
+        lines = [f"📋 {item.name}", item.scope]
+    else:
+        lines = [
+            f"📋 {item.name}",
+            "все сохранённые запуски этого контейнера",
+            f"текущий запуск: {when}",
+        ]
     if item.parts > 1:
         lines.append(
             f"Часть {item.part} из {item.parts}. "

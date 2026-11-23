@@ -17,7 +17,7 @@ from handlers.common import require_level, respond, show_main
 from keyboards.main import btn, nav_row
 from services.alerts import notify_superadmin
 from services.audit import audit
-from services.container_logs import DockerError, log_caption, read_runtime_logs
+from services.container_logs import DockerError, LogQuery, log_caption, parse_log_since, query_label, read_runtime_logs
 from services.chat_migration import adopt_if_migrated, note_group_migration
 from services.group_export import KEY_GROUP, KEY_SENT_AT, markers_chat_id, publish_markers_export
 from services.jobs import reschedule_telegram_backup
@@ -36,10 +36,11 @@ from services.telegram_backup import (
     telegram_backup_chat,
 )
 from services.vpn_monitor import ping_status_line
-from utils.callbacks import SEC_LOGS, SEC_SERVICE
+from states import LogsSG
+from utils.callbacks import NAV_MAIN, SEC_LOGS, SEC_SERVICE
 from utils.formatting import esc
 from utils.telegram import answer_callback, bytes_file, retry_file_send
-from utils.time import format_dt_iso
+from utils.time import format_dt_iso, local_today, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def _backup_line(config: Config, chat_id: int | None, title: str | None, last_se
     )
 
 
-async def show_service(cb: CallbackQuery, repo: Repo, config: Config) -> None:
+async def show_service(target: CallbackQuery | Message, repo: Repo, config: Config) -> None:
     counts = await repo.counts()
     version = await repo.db.user_version()
     last_backup = await repo.db.get_system("last_backup_at")
@@ -97,7 +98,7 @@ async def show_service(cb: CallbackQuery, repo: Repo, config: Config) -> None:
     if chat_id is not None:
         b.row(btn("📤 Отправить таблицу в группу", "srvg"))
     b.row(*nav_row())
-    await respond(cb, "\n".join(lines), b.as_markup())
+    await respond(target, "\n".join(lines), b.as_markup())
 
 
 @router.callback_query(F.data == SEC_SERVICE)
@@ -136,24 +137,108 @@ async def manual_backup(
     await show_service(cb, repo, config)
 
 
-async def _send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bot: Bot, actor: Actor) -> bool:
-    await answer_callback(cb, "Собираю логи…")
+_LOGS_MENU_TEXT = (
+    "📋 <b>Логи контейнеров</b>\n\n"
+    "Что прислать? Журнал хранится между перезапусками, пока контейнер не создадут заново.\n\n"
+    "Прошлый и позапрошлый ищутся по строке старта в журнале. "
+    "Если её нет, прошлым считается всё, что было до текущего запуска."
+)
+_LOG_MODE = {"all": "all", "cur": "current", "prev": "previous", "pp": "before_previous"}
+
+
+def _logs_level(origin: str) -> int:
+    return LEVEL_SUPERADMIN if origin == "s" else LEVEL_ADMIN
+
+
+def _parse_logs_callback(data: str) -> tuple[str, str] | None:
+    action, sep, origin = data.removeprefix("lg:").partition(":")
+    if not sep or origin not in {"s", "m"} or action not in {"menu", "since", *_LOG_MODE}:
+        return None
+    return action, origin
+
+
+def _logs_menu_kb(origin: str):
+    b = InlineKeyboardBuilder()
+    b.row(btn("Всё сохранённое", f"lg:all:{origin}"))
+    b.row(btn("Текущий запуск", f"lg:cur:{origin}"))
+    b.row(btn("Прошлый запуск", f"lg:prev:{origin}"))
+    b.row(btn("Позапрошлый запуск", f"lg:pp:{origin}"))
+    b.row(btn("С даты до сейчас", f"lg:since:{origin}"))
+    b.row(*nav_row(SEC_SERVICE if origin == "s" else NAV_MAIN))
+    return b.as_markup()
+
+
+def _logs_since_kb(origin: str):
+    b = InlineKeyboardBuilder()
+    b.row(btn("⬅️ К выбору", f"lg:menu:{origin}"))
+    b.row(*nav_row())
+    return b.as_markup()
+
+
+def _since_text(tz_name: str) -> str:
+    return (
+        "С какого момента прислать логи, до текущего времени?\n\n"
+        "Например: <code>04.11.2026</code> или <code>04.11.2026 15:30</code>. "
+        f"Можно написать «вчера». Время считается по поясу {esc(tz_name)}."
+    )
+
+
+async def _show_logs_menu(target: CallbackQuery | Message, state: FSMContext, origin: str) -> None:
+    await state.clear()
+    await respond(target, _LOGS_MENU_TEXT, _logs_menu_kb(origin))
+
+
+async def _return_after_logs(
+    target: CallbackQuery | Message,
+    state: FSMContext,
+    repo: Repo,
+    config: Config,
+    actor: Actor,
+    origin: str,
+) -> None:
+    if origin == "s":
+        await state.clear()
+        await show_service(target, repo, config)
+        return
+    await show_main(target, actor, config, repo, state)
+
+
+def _logs_reply(target: CallbackQuery | Message) -> Message | None:
+    return target.message if isinstance(target, CallbackQuery) else target
+
+
+async def _send_container_logs(
+    target: CallbackQuery | Message,
+    repo: Repo,
+    config: Config,
+    bot: Bot,
+    actor: Actor,
+    query: LogQuery,
+) -> bool:
+    reply = _logs_reply(target)
+    user = target.from_user
+    if isinstance(target, CallbackQuery):
+        await answer_callback(target, "Собираю логи…")
+    elif reply is not None:
+        await reply.answer("Собираю логи…")
+    if user is None:
+        return False
     try:
-        files = await read_runtime_logs(config)
+        files = await read_runtime_logs(config, query=query)
     except DockerError as exc:
-        if cb.message is not None:
-            await cb.message.answer(str(exc))
+        if reply is not None:
+            await reply.answer(str(exc))
         return False
     except Exception:
         logger.exception("Container logs failed")
-        if cb.message is not None:
-            await cb.message.answer("Не удалось прочитать логи контейнеров.")
+        if reply is not None:
+            await reply.answer("Не удалось прочитать логи контейнеров.")
         return False
     for item in files:
         try:
             await retry_file_send(
                 bot.send_document,
-                cb.from_user.id,
+                user.id,
                 bytes_file(item.body, item.filename),
                 name=f"container logs {item.name}",
                 caption=log_caption(item, config.timezone),
@@ -161,10 +246,10 @@ async def _send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bo
             )
         except Exception:
             logger.exception("Failed to send logs of %s", item.name)
-            if cb.message is not None:
-                await cb.message.answer(f"Не удалось отправить логи {item.name}.")
+            if reply is not None:
+                await reply.answer(f"Не удалось отправить логи {item.name}.")
     names = list(dict.fromkeys(item.name for item in files))
-    await audit(repo, actor, "logs.containers", контейнеры=", ".join(names))
+    await audit(repo, actor, "logs.containers", контейнеры=", ".join(names), период=query_label(query, config.timezone))
     return True
 
 
@@ -172,25 +257,48 @@ async def _send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bo
 async def send_container_logs_from_menu(
     cb: CallbackQuery,
     state: FSMContext,
+    actor: Actor | None,
+) -> None:
+    if not await require_level(cb, actor, LEVEL_ADMIN):
+        return
+    await _show_logs_menu(cb, state, "m")
+
+
+@router.callback_query(F.data == "srvlog")
+async def send_container_logs(cb: CallbackQuery, state: FSMContext, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_SUPERADMIN):
+        return
+    await _show_logs_menu(cb, state, "s")
+
+
+@router.callback_query(F.data.startswith("lg:"))
+async def container_logs_choice(
+    cb: CallbackQuery,
+    state: FSMContext,
     repo: Repo,
     config: Config,
     bot: Bot,
     actor: Actor | None,
 ) -> None:
-    if not await require_level(cb, actor, LEVEL_ADMIN):
+    parsed = _parse_logs_callback(cb.data or "")
+    if parsed is None:
+        await answer_callback(cb)
+        return
+    action, origin = parsed
+    if not await require_level(cb, actor, _logs_level(origin)):
         return
     assert actor is not None
-    if await _send_container_logs(cb, repo, config, bot, actor):
-        await show_main(cb, actor, config, repo, state)
-
-
-@router.callback_query(F.data == "srvlog")
-async def send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bot: Bot, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_SUPERADMIN):
+    if action == "menu":
+        await _show_logs_menu(cb, state, origin)
         return
-    assert actor is not None
-    if await _send_container_logs(cb, repo, config, bot, actor):
-        await show_service(cb, repo, config)
+    if action == "since":
+        await state.set_state(LogsSG.since)
+        await state.update_data(logs_origin=origin)
+        await respond(cb, _since_text(config.timezone), _logs_since_kb(origin))
+        return
+    query = LogQuery(mode=_LOG_MODE[action])
+    if await _send_container_logs(cb, repo, config, bot, actor, query):
+        await _return_after_logs(cb, state, repo, config, actor, origin)
 
 
 @router.callback_query(F.data == "srvg")
@@ -363,3 +471,35 @@ async def unbind_markers_group(message: Message, repo: Repo, config: Config, act
         await message.answer("Сохранённая группа сброшена. Снова используется MARKERS_GROUP_ID из настроек.")
         return
     await message.answer("Группа для таблицы отключена. Автоотправка остановлена.")
+
+
+@router.message(LogsSG.since, F.text)
+async def container_logs_since(
+    message: Message,
+    state: FSMContext,
+    repo: Repo,
+    config: Config,
+    bot: Bot,
+    actor: Actor | None,
+) -> None:
+    origin = str((await state.get_data()).get("logs_origin") or "m")
+    if origin not in {"s", "m"}:
+        origin = "m"
+    if not await require_level(message, actor, _logs_level(origin)):
+        await state.clear()
+        return
+    assert actor is not None
+    try:
+        since = parse_log_since(message.text or "", config.timezone, today=local_today(config.timezone))
+    except ValueError:
+        await message.answer(
+            "Не понял дату. Пример: <code>04.11.2026</code> или <code>04.11.2026 15:30</code>.",
+            reply_markup=_logs_since_kb(origin),
+        )
+        return
+    if since > now_utc():
+        await message.answer("Эта дата ещё не наступила.", reply_markup=_logs_since_kb(origin))
+        return
+    query = LogQuery(mode="since", since=since)
+    if await _send_container_logs(message, repo, config, bot, actor, query):
+        await _return_after_logs(message, state, repo, config, actor, origin)

@@ -72,3 +72,7 @@ class WipeSG(StatesGroup):
 class BroadcastSG(StatesGroup):
     text = State()
     confirm = State()
+
+
+class LogsSG(StatesGroup):
+    since = State()
