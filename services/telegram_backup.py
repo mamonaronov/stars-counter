@@ -30,6 +30,7 @@ from database.database import Database
 from services.chat_migration import MIGRATIONS_KEY, resolve_chat_id, send_following_migration
 from utils.app_version import app_build_identity, slugify_commit_title
 from utils.formatting import seconds_human
+from utils.telegram import retry_file_send
 from utils.time import now_utc, parse_iso, to_iso, to_local
 
 logger = logging.getLogger(__name__)
@@ -422,9 +423,11 @@ async def send_telegram_backup(
     delivered_to = dest
 
     async def _send(chat_id: int):
-        return await bot.send_document(
+        return await retry_file_send(
+            bot.send_document,
             chat_id,
             FSInputFile(path, filename=path.name),
+            name="telegram backup",
             caption=caption,
             disable_notification=silent,
             request_timeout=120,

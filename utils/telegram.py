@@ -5,16 +5,41 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, TypeVar
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 
 def is_transient_telegram_error(exc: BaseException) -> bool:
     return isinstance(exc, (TelegramNetworkError, TimeoutError))
+
+
+def _failed_before_telegram_answered(exc: BaseException) -> bool:
+    """The HTTP call died locally. A timeout may already have been accepted, so it is not retried."""
+    if not isinstance(exc, TelegramNetworkError):
+        return False
+    return "timeout" not in str(exc).lower()
+
+
+async def retry_unanswered_call(start: Callable[[], Awaitable[T]], *, name: str) -> T:
+    """Run start once more when the first attempt never got a Telegram response."""
+    try:
+        return await start()
+    except TelegramNetworkError as exc:
+        if not _failed_before_telegram_answered(exc):
+            raise
+        logger.warning("%s did not reach Telegram (%s), retrying once", name, exc)
+        return await start()
+
+
+async def retry_file_send(sender: Callable[..., Awaitable[T]], /, *args: Any, name: str, **kwargs: Any) -> T:
+    """Send a file, and try once more if Telegram never answered the first upload."""
+    return await retry_unanswered_call(lambda: sender(*args, **kwargs), name=name)
 
 
 def is_stale_callback_error(exc: BaseException) -> bool:

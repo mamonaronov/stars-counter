@@ -35,7 +35,7 @@ from services.stats import StudentStats, compute_group_stats
 from states import MonthSG
 from utils.callbacks import SEC_MONTHS, SEC_REPORT_PREV, SEC_REPORTS
 from utils.formatting import esc, percent_text
-from utils.telegram import answer_callback, bytes_file
+from utils.telegram import answer_callback, bytes_file, retry_file_send
 from utils.time import format_date, local_today, parse_date_text
 
 router = Router(name="months")
@@ -189,8 +189,10 @@ async def send_period_report(cb: CallbackQuery, repo: Repo, config: Config, acto
     safe_title = re.sub(r"[^\w.-]+", "_", period.title.replace("Текущий: ", "")).strip("_") or "period"
     prefix = "Промежуточный_отчёт" if not period.closed else "Отчёт"
     await answer_callback(cb, "Готовлю файл…")
-    await cb.message.answer_document(
+    await retry_file_send(
+        cb.message.answer_document,
         bytes_file(data, f"{prefix}_{safe_title}.xlsx"),
+        name="period report",
         caption=f"{'Промежуточный отчёт' if not period.closed else 'Отчёт'}: {esc(period.title)}\n"
         f"{period.start_date.strftime('%d.%m.%Y')} — {period.end_date.strftime('%d.%m.%Y')} · {len(stats)} студентов",
     )

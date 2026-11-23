@@ -23,7 +23,7 @@ from services.periods import build_periods, students_for_period
 from services.report import PeriodSection, build_periods_xlsx
 from services.stats import compute_group_stats
 from utils.formatting import esc, events_word, plural_ru, students_word
-from utils.telegram import bytes_file
+from utils.telegram import bytes_file, retry_file_send
 from utils.time import local_now, local_today, now_utc, to_iso
 
 logger = logging.getLogger(__name__)
@@ -215,11 +215,14 @@ async def _deliver(bot: Bot, db: Database, chat_id: int, payload: MarkersPayload
     previous = await db.get_system(KEY_MESSAGE_ID)
 
     async def _send(target: int):
-        return await bot.send_document(
+        return await retry_file_send(
+            bot.send_document,
             target,
             bytes_file(payload.data, payload.filename),
+            name="markers export",
             caption=payload.caption,
             disable_notification=silent,
+            request_timeout=120,
         )
 
     message, chat_id = await send_following_migration(db, chat_id, _send)

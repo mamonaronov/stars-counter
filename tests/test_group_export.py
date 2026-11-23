@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from io import BytesIO
 
+import pytest
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.methods import GetMe
 from openpyxl import load_workbook
 
 from config import Config
@@ -22,7 +25,7 @@ class FakeBot:
         self.pinned: list[int] = []
         self._n = 0
 
-    async def send_document(self, chat_id, document, caption=None, disable_notification=None):
+    async def send_document(self, chat_id, document, caption=None, disable_notification=None, request_timeout=None):
         self._n += 1
         self.docs.append(
             {
@@ -78,6 +81,64 @@ async def test_export_follows_attendance_and_replaces_the_previous_file(repo: Re
     assert await markers_chat_id(repo.db, cfg) == -200555
     assert await publish_markers_export(bot, repo, cfg, silent=True, force=True) == "sent"
     assert bot.docs[-1]["chat_id"] == -200555
+
+
+def _network(message: str) -> TelegramNetworkError:
+    return TelegramNetworkError(method=GetMe(), message=message)
+
+
+class _FlakyBot(FakeBot):
+    def __init__(self, message: str, *, times: int) -> None:
+        super().__init__()
+        self._message = message
+        self._times = times
+        self.attempts = 0
+
+    async def send_document(self, chat_id, document, caption=None, disable_notification=None, request_timeout=None):
+        self.attempts += 1
+        if self.attempts <= self._times:
+            raise _network(self._message)
+        return await super().send_document(
+            chat_id, document, caption, disable_notification, request_timeout
+        )
+
+
+async def _one_lesson(repo: Repo) -> None:
+    await repo.create_student("Антонов Антон", 2024, "2026-09-01", 1)
+    await repo.create_event("Лекция", "mandatory", "2026-09-01", "10:00", None, 1)
+
+
+async def test_export_retries_once_when_the_connector_is_already_closed(repo: Repo, config: Config):
+    await _one_lesson(repo)
+    bot = _FlakyBot("ClientConnectionError: Connector is closed.", times=1)
+    cfg = replace(config, markers_group_id=-100123)
+
+    assert await publish_markers_export(bot, repo, cfg, silent=True) == "sent"
+    assert bot.attempts == 2
+    assert len(bot.docs) == 1
+    assert bot.docs[0]["chat_id"] == -100123
+
+
+async def test_export_does_not_retry_a_timeout(repo: Repo, config: Config):
+    await _one_lesson(repo)
+    bot = _FlakyBot("Request timeout error", times=1)
+    cfg = replace(config, markers_group_id=-100123)
+
+    with pytest.raises(TelegramNetworkError):
+        await publish_markers_export(bot, repo, cfg, silent=True)
+    assert bot.attempts == 1
+    assert bot.docs == []
+
+
+async def test_export_stops_after_the_second_network_failure(repo: Repo, config: Config):
+    await _one_lesson(repo)
+    bot = _FlakyBot("ClientConnectionError: Connector is closed.", times=2)
+    cfg = replace(config, markers_group_id=-100123)
+
+    with pytest.raises(TelegramNetworkError):
+        await publish_markers_export(bot, repo, cfg, silent=True)
+    assert bot.attempts == 2
+    assert bot.docs == []
 
 
 async def test_export_stays_off_without_a_group(repo: Repo, config: Config):

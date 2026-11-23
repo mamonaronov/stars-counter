@@ -38,7 +38,7 @@ from services.telegram_backup import (
 from services.vpn_monitor import ping_status_line
 from utils.callbacks import SEC_LOGS, SEC_SERVICE
 from utils.formatting import esc
-from utils.telegram import answer_callback, bytes_file
+from utils.telegram import answer_callback, bytes_file, retry_file_send
 from utils.time import format_dt_iso
 
 logger = logging.getLogger(__name__)
@@ -151,9 +151,11 @@ async def _send_container_logs(cb: CallbackQuery, repo: Repo, config: Config, bo
         return False
     for item in files:
         try:
-            await bot.send_document(
+            await retry_file_send(
+                bot.send_document,
                 cb.from_user.id,
                 bytes_file(item.body, item.filename),
+                name=f"container logs {item.name}",
                 caption=log_caption(item, config.timezone),
                 request_timeout=120,
             )

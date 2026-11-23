@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
+import pytest
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetChat
 from aiogram.types import FSInputFile
@@ -175,6 +176,52 @@ class _Scheduler:
 
     def add_job(self, func, trigger, **kwargs) -> None:
         self.jobs.append({"func": func, "trigger": trigger, **kwargs})
+
+
+class _FlakyBot(FakeBot):
+    def __init__(self, message: str, *, times: int) -> None:
+        super().__init__()
+        self._message = message
+        self._times = times
+        self.attempts = 0
+
+    async def send_document(self, chat_id, document, caption=None, disable_notification=None, request_timeout=None):
+        self.attempts += 1
+        if self.attempts <= self._times:
+            raise TelegramNetworkError(method=GetChat(chat_id=chat_id), message=self._message)
+        return await super().send_document(chat_id, document, caption, disable_notification, request_timeout)
+
+
+async def test_backup_retries_once_when_the_upload_never_reached_telegram(repo: Repo, config: Config, tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / ".env.example").write_text("BOT_TOKEN=\n", encoding="utf-8")
+    cfg = replace(config, telegram_backup_root=root)
+    await repo.db.set_system(CHAT_ID_KEY, "-100777")
+    await repo.create_student("Петров Пётр", 2024, "2026-09-01", 1)
+    bot = _FlakyBot("ClientConnectionError: Connector is closed.", times=1)
+
+    sent = await send_telegram_backup(repo.db, bot, cfg, silent=True)
+    assert sent is not None
+    assert bot.attempts == 2
+    assert len(bot.docs) == 1
+    assert await repo.db.get_system(FINGERPRINT_KEY)
+
+
+async def test_backup_does_not_retry_a_timeout(repo: Repo, config: Config, tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / ".env.example").write_text("BOT_TOKEN=\n", encoding="utf-8")
+    cfg = replace(config, telegram_backup_root=root)
+    await repo.db.set_system(CHAT_ID_KEY, "-100777")
+    await repo.create_student("Петров Пётр", 2024, "2026-09-01", 1)
+    bot = _FlakyBot("Request timeout error", times=1)
+
+    with pytest.raises(TelegramNetworkError):
+        await send_telegram_backup(repo.db, bot, cfg, silent=True)
+    assert bot.attempts == 1
+    assert bot.docs == []
+    assert await repo.db.get_system(FINGERPRINT_KEY) is None
 
 
 class _ProxyDownBot(FakeBot):

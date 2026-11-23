@@ -53,7 +53,7 @@ class _ExportBot:
         self._always = always
         self._migrated = False
 
-    async def send_document(self, chat_id, document, caption=None, disable_notification=None):
+    async def send_document(self, chat_id, document, caption=None, disable_notification=None, request_timeout=None):
         self.docs.append(chat_id)
         if self._always or (self._migrate_once and chat_id == OLD and not self._migrated):
             self._migrated = True

@@ -26,7 +26,7 @@ from services.vpn_charts import (
 )
 from services.vpn_monitor import format_vpn_log, subscription_label, vpn_samples_as_dicts
 from utils.formatting import colon_block, pre_html, seconds_human
-from utils.telegram import answer_callback, png_file, safe_send, text_file
+from utils.telegram import answer_callback, png_file, retry_file_send, safe_send, text_file
 from utils.time import now_utc, parse_iso, to_iso
 from utils.uptime import bot_uptime_seconds, host_uptime_seconds, uptime_report_lines
 
@@ -418,8 +418,10 @@ async def admin_load_chart(cb: CallbackQuery, config: Config, repo: Repo, actor:
         return
     caption, png = chart
     await safe_send(
+        retry_file_send,
         cb.message.answer_document,
         png_file(png, "load-avg.png"),
+        name="load chart",
         caption=caption[:1024],
     )
 
@@ -457,8 +459,10 @@ async def admin_vpn_charts(cb: CallbackQuery, config: Config, repo: Repo, actor:
         else:
             filename = "vpn-distribution.png"
         await safe_send(
+            retry_file_send,
             cb.message.answer_document,
             png_file(png, filename),
+            name="vpn chart",
             caption=caption[:1024],
         )
 
@@ -489,8 +493,10 @@ async def admin_vpn_log(cb: CallbackQuery, config: Config, repo: Repo, actor: Ac
     if cb.message is None:
         return
     sent = await safe_send(
+        retry_file_send,
         cb.message.answer_document,
         text_file(text, filename),
+        name="vpn log",
         caption=f"VPN-логи за {title} · {len(payload)} записей",
     )
     if sent is None:
