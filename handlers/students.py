@@ -12,9 +12,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Config
 from database.models import Student
 from database.queries import Repo
-from handlers.common import require_level, respond, show_student_picker
+from handlers.common import load_periods, period_header, require_level, respond, show_student_picker
 from keyboards.main import btn, cancel_kb, confirm_kb, fit_page, nav_row, pager_row
 from services.audit import audit
+from services.periods import OPEN_KEY, find_period, period_button_label, period_of_event
 from services.roles import LEVEL_ADMIN, LEVEL_ASSIGNING_MARKER, LEVEL_MARKER, Actor, role_title
 
 PROTECTED_STUDENT = "Нельзя менять студента с такой же или более высокой ролью."
@@ -108,6 +109,7 @@ async def show_student_card(target: CallbackQuery | Message, repo: Repo, config:
         user = await repo.get_user(student.telegram_id)
         tg_display = user.display if user else None
     b = InlineKeyboardBuilder()
+    b.row(btn("✅ Занятия", f"sta:{student.id}"))
     if student.is_active:
         if not student.is_verified:
             b.row(btn("🔗 Ссылка верификации", f"verl:{student.id}"))
@@ -138,6 +140,162 @@ async def student_card(cb: CallbackQuery, state: FSMContext, repo: Repo, config:
         return
     await state.clear()
     await show_student_card(cb, repo, config, int(cb.data.split(":", 1)[1]))
+
+
+async def show_student_events(
+    cb: CallbackQuery,
+    repo: Repo,
+    config: Config,
+    student: Student,
+    periods: list,
+    period_key: str,
+    *,
+    page: int = 0,
+    notice: str | None = None,
+) -> None:
+    period = find_period(periods, period_key)
+    if period is None:
+        await answer_callback(cb, "Период не найден", show_alert=True)
+        return
+    present = await repo.attendance_of_student(student.id)
+    events = list(period.events)
+    eligible = [event for event in events if student.counts_on(event.day)]
+    present_n = sum(1 for event in eligible if event.id in present)
+    text = (
+        f"✅ <b>Занятия</b>\n{esc(student.full_name)}\n{period_header(period)}\n\n"
+        f"Отмечено: <b>{present_n}</b> из {len(eligible)}\n"
+        "Нажмите на занятие, чтобы поставить или снять отметку."
+    )
+    if len(events) != len(eligible):
+        text += "\n\nКнопка с «·» — студент в эту дату не учитывается."
+    if not events:
+        text += "\n\nВ этом месяце занятий нет."
+    b = InlineKeyboardBuilder()
+    page, pages, size = fit_page(len(events), page, reserved=3)
+    for event in events[page * size : (page + 1) * size]:
+        if event.id in present:
+            mark = "✅ "
+        elif not student.counts_on(event.day):
+            mark = "· "
+        else:
+            mark = "❌ "
+        kind = "" if event.is_mandatory else " (св.)"
+        time = f" {event.start_time}" if event.start_time else ""
+        label = f"{mark}{event.day.strftime('%d.%m')}{time} {event.title}{kind}"
+        b.row(btn(label, f"satt:{student.id}:{event.id}:{page}"))
+    if pages > 1:
+        b.row(*pager_row(f"stap:{student.id}:{period.key}", page, pages))
+    b.row(btn("📆 Все месяцы", f"stam:{student.id}"))
+    b.row(*nav_row(f"stc:{student.id}", back_text="⬅️ К карточке"))
+    await respond(cb, text, b.as_markup(), notice=notice)
+
+
+async def _open_student_period(
+    cb: CallbackQuery,
+    repo: Repo,
+    config: Config,
+    student_id: int,
+    period_key: str | None,
+    *,
+    page: int = 0,
+    notice: str | None = None,
+) -> None:
+    student = await repo.get_student(student_id)
+    if student is None:
+        await answer_callback(cb, "Студент не найден", show_alert=True)
+        return
+    periods = await load_periods(repo, config)
+    key = period_key or OPEN_KEY
+    if find_period(periods, key) is None:
+        await answer_callback(cb, "Период не найден", show_alert=True)
+        return
+    await show_student_events(cb, repo, config, student, periods, key, page=page, notice=notice)
+
+
+@router.callback_query(F.data.startswith("sta:"))
+async def open_student_events(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+        return
+    parts = (cb.data or "").split(":")
+    if len(parts) not in {2, 3}:
+        await answer_callback(cb)
+        return
+    student_id = int(parts[1])
+    period_key = parts[2] if len(parts) == 3 else None
+    await _open_student_period(cb, repo, config, student_id, period_key)
+
+
+@router.callback_query(F.data.startswith("stap:"))
+async def student_events_page(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+        return
+    _, raw_student, key, raw_page = (cb.data or "").split(":")
+    await _open_student_period(cb, repo, config, int(raw_student), key, page=int(raw_page))
+
+
+@router.callback_query(F.data.startswith("stam:"))
+async def student_event_months(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+        return
+    student = await repo.get_student(int((cb.data or "").split(":", 1)[1]))
+    if student is None:
+        await answer_callback(cb, "Студент не найден", show_alert=True)
+        return
+    periods = await load_periods(repo, config)
+    b = InlineKeyboardBuilder()
+    for period in reversed(periods):
+        b.row(btn(period_button_label(period), f"sta:{student.id}:{period.key}"))
+    b.row(*nav_row(f"sta:{student.id}", back_text="⬅️ К занятиям"))
+    await respond(cb, f"✅ <b>Занятия</b>\n{esc(student.full_name)}\n\nВыберите месяц:", b.as_markup())
+
+
+@router.callback_query(F.data.startswith("satt:"))
+async def toggle_student_event(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+        return
+    assert actor is not None
+    _, raw_student, raw_event, raw_page = (cb.data or "").split(":")
+    student = await repo.get_student(int(raw_student))
+    event = await repo.get_event(int(raw_event))
+    if student is None or event is None or event.deleted_at:
+        await answer_callback(cb, "Занятие или студент не найдены", show_alert=True)
+        return
+    changed, present = await repo.toggle_presence(
+        event.id,
+        student.id,
+        actor.telegram_id,
+        allow_mark=student.counts_on(event.day),
+    )
+    if not changed and not present and not student.counts_on(event.day):
+        await answer_callback(
+            cb,
+            f"{student.full_name} не учитывается на {event.day.strftime('%d.%m.%Y')}: "
+            "на эту дату студента ещё не было в группе.",
+            show_alert=True,
+        )
+        return
+    if changed:
+        await audit(
+            repo,
+            actor,
+            "attendance.unmark" if not present else "attendance.mark",
+            entity_type="event",
+            entity_id=event.id,
+            студент=student.full_name,
+            занятие=f"{event.day.strftime('%d.%m.%Y')} {event.title}",
+        )
+    periods = await load_periods(repo, config)
+    period = period_of_event(periods, event.id)
+    key = period.key if period is not None else OPEN_KEY
+    await _open_student_period(
+        cb,
+        repo,
+        config,
+        student.id,
+        key,
+        page=int(raw_page),
+        notice=f"{'Отмечено' if present else 'Снято'}: {event.day.strftime('%d.%m')} {event.title}",
+    )
 
 
 # ------------------------------------------------------------------- add

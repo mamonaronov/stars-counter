@@ -736,6 +736,37 @@ async def test_previous_month_button_without_a_closed_month(h: Harness):
     assert h.session.last("AnswerCallbackQuery").text == "Прошлого месяца ещё нет."
 
 
+async def test_student_card_toggles_attendance_by_event(h: Harness):
+    student = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
+    marker = await h.repo.create_student("Отмечающий Марк", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(marker.id, MARKER)
+    await h.repo.set_role(marker.id, "assigning_marker")
+    september = await h.repo.create_event("Лекция", "mandatory", "2026-09-01", "10:00", None, SUPER)
+    october = await h.repo.create_event("Семинар", "mandatory", "2026-10-02", "10:00", None, SUPER)
+    await h.repo.update_event(september.id, closes_month=1, month_title="Сентябрь 2026")
+
+    await h.text(MARKER, "/start")
+    await h.click(MARKER, "s:stu")
+    await h.press(MARKER, "Список")
+    await h.press(MARKER, "Иванов")
+    await h.press(MARKER, "Занятия")
+    assert "Текущий: Октябрь 2026" in h.last_text()
+    assert any("Семинар" in label for label in h.buttons())
+    assert not any("Лекция" in label for label in h.buttons())
+
+    await h.press(MARKER, "Семинар")
+    assert await h.repo.is_present(october.id, student.id)
+    assert "Отмечено" in (h.session.last("AnswerCallbackQuery").text or "")
+    await h.press(MARKER, "Семинар")
+    assert not await h.repo.is_present(october.id, student.id)
+
+    await h.press(MARKER, "Все месяцы")
+    await h.press(MARKER, "Сентябрь 2026")
+    await h.press(MARKER, "Лекция")
+    assert await h.repo.is_present(september.id, student.id)
+    assert "Семинар" not in h.last_text()
+
+
 async def test_removed_student_keeps_own_attendance(h: Harness):
     student = await h.repo.create_student("Бывший Борис", 2023, "2026-09-01", SUPER)
     await h.repo.bind_telegram(student.id, STUDENT)
