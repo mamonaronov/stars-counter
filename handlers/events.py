@@ -225,7 +225,7 @@ async def new_event_title(message: Message, state: FSMContext) -> None:
     await state.set_state(NewEventSG.kind)
     await message.answer(
         f"Название: <b>{esc(title)}</b>\n\nТип занятия?\n"
-        "Обязательное входит в знаменатель процента; свободное учитывается только тем, кто пришёл.",
+        "Обязательное входит в знаменатель процента; свободное учитывается тем, кто пришёл, и тем, у кого в этот день больничный.",
         reply_markup=kind_kb("nk", back=SEC_NEW_EVENT),
     )
 

@@ -67,12 +67,43 @@ def test_cancelled_excuse_is_ignored():
     assert stats.percent == 0.0
 
 
-def test_excuse_does_not_apply_to_free_events():
+def test_sick_leave_counts_a_missed_free_event_as_attended():
     s = student()
-    events = [event(1, "2026-09-05", kind="free")]
+    events = [event(1, "2026-09-01"), event(2, "2026-09-05", kind="free")]
     stats = compute_student_stats(s, events, set(), [excuse(1, "2026-09-01", "2026-09-30")])
-    assert stats.rows[0].status == STATUS_FREE_SKIPPED
+    assert [row.status for row in stats.rows] == [STATUS_EXCUSED, STATUS_EXCUSED]
+    assert stats.rows[1].excuse is not None and stats.rows[1].excuse.kind == "sick"
+    assert stats.excused == 2
+    assert stats.attended_free == 0
+    assert stats.percent == 200.0
+
+
+def test_marked_free_event_stays_present_during_sick_leave():
+    s = student()
+    events = [event(1, "2026-09-01"), event(2, "2026-09-05", kind="free")]
+    stats = compute_student_stats(s, events, {2}, [excuse(1, "2026-09-01", "2026-09-30")])
+    assert stats.rows[1].status == STATUS_PRESENT
+    assert stats.attended_free == 1
+    assert stats.excused == 1
+    assert stats.percent == 200.0
+
+
+def test_open_sick_leave_covers_later_free_events():
+    s = student()
+    events = [event(1, "2026-09-01", kind="free"), event(2, "2026-09-10", kind="free")]
+    stats = compute_student_stats(s, events, set(), [excuse(1, "2026-09-05", None)])
+    assert [row.status for row in stats.rows] == [STATUS_FREE_SKIPPED, STATUS_EXCUSED]
+    assert stats.excused == 1
     assert stats.percent is None
+
+
+def test_leave_does_not_cover_free_events():
+    s = student()
+    events = [event(1, "2026-09-05", kind="free"), event(2, "2026-09-05")]
+    stats = compute_student_stats(s, events, set(), [excuse(1, "2026-09-01", "2026-09-30", kind="leave")])
+    assert stats.rows[0].status == STATUS_FREE_SKIPPED
+    assert stats.rows[1].status == STATUS_EXCUSED
+    assert stats.percent == 100.0
 
 
 def test_events_before_joined_on_are_not_counted():

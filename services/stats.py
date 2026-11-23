@@ -1,11 +1,12 @@
 """Attendance percentage.
 
-percent = (attended mandatory + attended free + excused mandatory misses) / mandatory total * 100
+percent = (attended mandatory + attended free + excused misses) / mandatory total * 100
 
-* free events a student skipped are ignored; attended free events add to the numerator,
-  so the percentage can exceed 100;
-* mandatory events missed during an active sick leave / approved absence count as attended;
-  an open sick leave has no end date and covers every day from its start onward;
+* free events a student skipped are ignored, so the percentage can exceed 100;
+  a free event covered by sick leave counts as an excused visit;
+* mandatory events missed during an active sick leave or an approved absence count
+  as attended; an open sick leave has no end date and covers every day from its start;
+* an approved absence does not cover free events;
 * only events on/after the student's ``joined_on`` (and before ``left_on``) are counted.
 """
 
@@ -61,8 +62,10 @@ class StudentStats:
         return self.percent if self.percent is not None else 0.0
 
 
-def _excuse_for(excuses: list[Excuse], event: Event) -> Excuse | None:
+def _excuse_for(excuses: list[Excuse], event: Event, *, kind: str | None = None) -> Excuse | None:
     for excuse in excuses:
+        if kind is not None and excuse.kind != kind:
+            continue
         if excuse.covers(event.day):
             return excuse
     return None
@@ -96,6 +99,11 @@ def compute_student_stats(
             if present:
                 stats.attended_free += 1
                 stats.rows.append(EventRow(event, STATUS_PRESENT))
+                continue
+            excuse = _excuse_for(excuses, event, kind="sick")
+            if excuse is not None:
+                stats.excused += 1
+                stats.rows.append(EventRow(event, STATUS_EXCUSED, excuse))
             else:
                 stats.rows.append(EventRow(event, STATUS_FREE_SKIPPED))
     return stats
