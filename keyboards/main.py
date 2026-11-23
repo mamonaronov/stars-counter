@@ -34,7 +34,6 @@ from utils.callbacks import (
     SEC_USAGE,
     SEC_WIPE,
     SEC_TEMPLATES,
-    SEC_VERIFY,
     SEC_BROADCAST,
 )
 from utils.formatting import truncate
@@ -110,7 +109,10 @@ def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardM
         req_label = f"📨 Запросы ({open_requests})" if open_requests else "📨 Запросы"
         b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS), btn(req_label, SEC_REQUESTS))
         b.row(btn("🩺 Больничные и отпросы", SEC_EXCUSES), btn("📋 Шаблоны", SEC_TEMPLATES))
-        b.row(btn("🔗 Верификация", SEC_VERIFY), btn("🕵️ Журнал действий", SEC_AUDIT))
+        if level < LEVEL_ASSIGNING_MARKER:
+            b.row(btn("👥 Студенты", SEC_STUDENTS), btn("🕵️ Журнал действий", SEC_AUDIT))
+        else:
+            b.row(btn("🕵️ Журнал действий", SEC_AUDIT))
         b.row(btn("📢 Сообщение", SEC_BROADCAST))
     else:
         b.row(btn("🗓 Месяцы и отчёты", SEC_MONTHS))

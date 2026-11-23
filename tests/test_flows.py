@@ -39,7 +39,7 @@ async def test_verified_student_can_be_rebound_from_verification(h: Harness):
     await h.repo.set_role(marker.id, "marker")
 
     await h.text(MARKER, "/start")
-    await h.click(MARKER, "s:ver")
+    await h.click(MARKER, "s:stu")
     await h.press(MARKER, "Иванов")
     assert "уже подтверждён" in h.last_text()
     assert any("Отвязать и выдать ссылку" in label for label in h.buttons())
@@ -72,6 +72,13 @@ async def test_admin_and_above_can_unlink_themselves(h: Harness):
     await h.repo.set_role(admin.id, "admin")
     await h.repo.set_role(chief.id, "chief_marker")
 
+    await h.text(51, "/start")
+    assert "🔗 Верификация" not in h.buttons()
+    await h.click(51, "s:stu")
+    await h.press(51, "Список")
+    await h.press(51, "Админ")
+    assert any("Отвязать и выдать ссылку" in label for label in h.buttons())
+
     await h.text(52, "/start")
     await h.click(52, "s:ver")
     await h.press(52, "Главный")
@@ -101,9 +108,10 @@ async def test_verification_list_marks_verified_students(h: Harness):
     bound = await h.repo.create_student("Иванов Иван", 2023, "2026-09-01", SUPER)
     await h.repo.bind_telegram(bound.id, 50)
     await h.repo.create_student("Петров Пётр", 2023, "2026-09-01", SUPER)
-    await h.click(SUPER, "s:ver")
+    await h.click(SUPER, "s:stu")
+    await h.press(SUPER, "Список")
     buttons = h.buttons()
-    assert buttons["✅ Иванов Иван"] == f"pk:ver:{bound.id}"
+    assert buttons["✅ Иванов Иван"] == f"pk:stu:{bound.id}"
     assert "Петров Пётр" in buttons
     assert "✅ Петров Пётр" not in buttons
 
@@ -172,6 +180,7 @@ async def test_guest_sees_public_menu_only(h: Harness):
     assert "🩺 Больничные и отпросы" not in buttons
     assert "📢 Сообщение" not in buttons
     assert "🔗 Верификация" not in buttons
+    assert "👥 Студенты" not in buttons
     assert "👤 Моя посещаемость" not in buttons
     # permission check is enforced in the handler, not just by hiding the button
     await h.click(GUEST, "s:new")
@@ -281,7 +290,8 @@ async def test_full_flow(h: Harness):
     await h.text(MARKER, "/menu")
     assert "🎖 Роли" not in h.buttons()
     assert "🩺 Больничные и отпросы" in h.buttons()
-    assert "🔗 Верификация" in h.buttons()
+    assert "👥 Студенты" in h.buttons()
+    assert "🔗 Верификация" not in h.buttons()
     await h.click(MARKER, "rola:1:marker")
     assert "Недостаточно прав" in h.session.last("AnswerCallbackQuery").text
 
@@ -862,3 +872,73 @@ async def test_only_chief_admin_can_wipe_and_must_type_the_word(h: Harness):
     await h.text(SUPER, "/menu")
     assert any("Очистить все данные" in text for text in h.buttons())
     assert "🛠 Сервис" in h.buttons()
+
+
+async def test_students_screens_go_back_one_step(h: Harness):
+    await h.text(SUPER, "/start")
+    await h.click(SUPER, "s:stu")
+    await h.press(SUPER, "➕ Добавить")
+    assert h.buttons()["⬅️ Назад"] == "s:stu"
+    await h.press(SUPER, "Назад")
+    assert "В группе" in h.last_text()
+
+    await h.press(SUPER, "➕ Добавить")
+    await h.text(SUPER, "Новый Студент")
+    assert h.buttons()["⬅️ Назад"] == "stua"
+    await h.press(SUPER, "Назад")
+    assert "ФИО студента" in h.last_text()
+    await h.text(SUPER, "Новый Студент")
+    await h.text(SUPER, "2024")
+    assert h.buttons()["⬅️ Назад"] == "stby"
+    await h.press(SUPER, "Назад")
+    assert "Год поступления" in h.last_text()
+    await h.text(SUPER, "2024")
+    await h.press(SUPER, "Пропустить")
+    assert h.buttons()["⬅️ Назад"] == "stbd"
+    await h.press(SUPER, "Назад")
+    assert "Направление" in h.last_text()
+    await h.press(SUPER, "Пропустить")
+    await h.press(SUPER, "Пропустить")
+    assert h.buttons()["⬅️ Назад"] == "stbt"
+    await h.press(SUPER, "Назад")
+    assert "тфилин" in h.last_text()
+    await h.press(SUPER, "Пропустить")
+    await h.press(SUPER, "Пропустить")
+    assert h.buttons()["⬅️ Назад"] == "stbg"
+    await h.press(SUPER, "Назад")
+    assert "иудаики" in h.last_text()
+    await h.press(SUPER, "Меню")
+
+    await h.click(SUPER, "s:stu")
+    await h.press(SUPER, "Импорт списком")
+    assert h.buttons()["⬅️ Назад"] == "s:stu"
+    await h.text(SUPER, "Иванов Иван, 2023")
+    assert h.buttons()["⬅️ Назад"] == "stui"
+    await h.press(SUPER, "Другая дата учёта")
+    assert h.buttons()["⬅️ Назад"] == "stip"
+    await h.press(SUPER, "Назад")
+    assert "Будет добавлено" in h.last_text()
+    await h.press(SUPER, "Назад")
+    assert "Пришлите список" in h.last_text()
+    await h.text(SUPER, "Иванов Иван, 2023")
+    await h.press(SUPER, "Добавить 1")
+
+    await h.press(SUPER, "Список")
+    await h.press(SUPER, "Иванов")
+    await h.press(SUPER, "Ссылка верификации")
+    assert "start=v_" in h.last_text()
+    assert h.buttons()["⬅️ Назад"].startswith("stc:")
+    await h.press(SUPER, "Назад")
+    assert "не привязан" in h.last_text()
+    await h.press(SUPER, "Имя")
+    assert h.buttons()["⬅️ Назад"].startswith("stc:")
+    await h.press(SUPER, "Назад")
+    assert "Иванов Иван" in h.last_text()
+    await h.press(SUPER, "Удалить из группы")
+    assert h.buttons()["⬅️ Назад"].startswith("stc:")
+    await h.press(SUPER, "Назад")
+    assert "Иванов Иван" in h.last_text()
+    await h.press(SUPER, "Занятия")
+    assert any("К карточке" in label for label in h.buttons())
+    await h.press(SUPER, "Все месяцы")
+    assert any("К занятиям" in label for label in h.buttons())

@@ -13,7 +13,7 @@ from config import Config
 from database.models import Student
 from database.queries import Repo
 from handlers.common import load_periods, period_header, require_level, respond, show_student_picker
-from keyboards.main import btn, cancel_kb, confirm_kb, fit_page, nav_row, pager_row
+from keyboards.main import back_kb, btn, confirm_kb, fit_page, nav_row, pager_row
 from services.audit import audit
 from services.periods import OPEN_KEY, find_period, period_button_label, period_of_event
 from services.roles import LEVEL_ADMIN, LEVEL_ASSIGNING_MARKER, LEVEL_MARKER, Actor, role_title
@@ -47,6 +47,12 @@ VERIFY_CTX = "ver"
 # ---------------------------------------------------------------- section
 
 
+_MARKER_STUDENTS_TITLE = (
+    "👥 <b>Студенты</b>\n"
+    "Выберите студента. Привязанные отмечены ✅: нажмите, чтобы отвязать текущий Telegram и выдать новую ссылку."
+)
+
+
 async def show_students_home(target: CallbackQuery | Message, repo: Repo) -> None:
     counts = await repo.counts()
     text = (
@@ -60,19 +66,43 @@ async def show_students_home(target: CallbackQuery | Message, repo: Repo) -> Non
     await respond(target, text, b.as_markup())
 
 
+async def open_students_screen(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor) -> None:
+    await state.clear()
+    if actor.level >= LEVEL_ASSIGNING_MARKER:
+        await show_students_home(cb, repo)
+        return
+    await show_student_picker(
+        cb,
+        state,
+        repo,
+        ctx=VERIFY_CTX,
+        title=_MARKER_STUDENTS_TITLE,
+        back=NAV_MAIN,
+        mark_verified=True,
+    )
+
+
 @router.callback_query(F.data == SEC_STUDENTS)
 async def open_students(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
-    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+    if not await require_level(cb, actor, LEVEL_MARKER):
         return
-    await state.clear()
-    await show_students_home(cb, repo)
+    assert actor is not None
+    await open_students_screen(cb, state, repo, actor)
 
 
 @router.callback_query(F.data == "stul")
 async def students_list(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
-    await show_student_picker(cb, state, repo, ctx=PICK_CTX, title="👥 <b>Студенты</b>\nВыберите студента:", back=SEC_STUDENTS)
+    await show_student_picker(
+        cb,
+        state,
+        repo,
+        ctx=PICK_CTX,
+        title="👥 <b>Студенты</b>\nВыберите студента. Привязанные отмечены ✅.",
+        back=SEC_STUDENTS,
+        mark_verified=True,
+    )
 
 
 # ------------------------------------------------------------------ card
@@ -98,7 +128,15 @@ def _card_text(student: Student, config: Config, tg_display: str | None) -> str:
     return "\n".join(lines)
 
 
-async def show_student_card(target: CallbackQuery | Message, repo: Repo, config: Config, student_id: int, *, notice: str | None = None) -> None:
+async def show_student_card(
+    target: CallbackQuery | Message,
+    repo: Repo,
+    config: Config,
+    student_id: int,
+    *,
+    actor: Actor | None = None,
+    notice: str | None = None,
+) -> None:
     student = await repo.get_student(student_id)
     if student is None:
         if isinstance(target, CallbackQuery):
@@ -117,7 +155,9 @@ async def show_student_card(target: CallbackQuery | Message, repo: Repo, config:
         b.row(btn("Направление", f"ste:direction:{student.id}"), btn("Группа иудаики", f"ste:group:{student.id}"))
         b.row(btn("Молитва / тфилин", f"ste:track:{student.id}"))
         b.row(btn("📅 Учитывать с даты", f"ste:joined:{student.id}"))
-        if student.is_verified:
+        if student.is_verified and actor is not None and _can_rebind(actor, student, config.superadmin_id):
+            b.row(btn("🔓 Отвязать и выдать ссылку", f"vra:{student.id}"))
+        elif student.is_verified and actor is None:
             b.row(btn("🔓 Отвязать Telegram", f"stunl:{student.id}"))
         b.row(btn("🗑 Удалить из группы", f"std:{student.id}"))
     else:
@@ -131,7 +171,7 @@ async def pick_student(cb: CallbackQuery, state: FSMContext, repo: Repo, config:
     if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
-    await show_student_card(cb, repo, config, int(cb.data.rsplit(":", 1)[1]))
+    await show_student_card(cb, repo, config, int(cb.data.rsplit(":", 1)[1]), actor=actor)
 
 
 @router.callback_query(F.data.startswith("stc:"))
@@ -139,7 +179,7 @@ async def student_card(cb: CallbackQuery, state: FSMContext, repo: Repo, config:
     if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.clear()
-    await show_student_card(cb, repo, config, int(cb.data.split(":", 1)[1]))
+    await show_student_card(cb, repo, config, int(cb.data.split(":", 1)[1]), actor=actor)
 
 
 async def show_student_events(
@@ -306,14 +346,14 @@ async def add_student_start(cb: CallbackQuery, state: FSMContext, actor: Actor |
     if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
         return
     await state.set_state(StudentSG.add_name)
-    await respond(cb, "ФИО студента? Например: <i>Иванов Иван Иванович</i>.", cancel_kb(SEC_STUDENTS))
+    await respond(cb, "ФИО студента? Например: <i>Иванов Иван Иванович</i>.", back_kb(SEC_STUDENTS))
 
 
 @router.message(StudentSG.add_name, F.text)
 async def add_student_name(message: Message, state: FSMContext, repo: Repo) -> None:
     name = normalize_name(message.text or "")
     if len(name.split()) < 2:
-        await message.answer("Нужны минимум фамилия и имя.", reply_markup=cancel_kb(SEC_STUDENTS))
+        await message.answer("Нужны минимум фамилия и имя.", reply_markup=back_kb(SEC_STUDENTS))
         return
     existing = await repo.find_student_by_name(name)
     removed = None if existing else await repo.find_student_by_name(name, active_only=False)
@@ -337,7 +377,7 @@ async def add_student_name(message: Message, state: FSMContext, repo: Repo) -> N
             )
             b.row(btn("♻️ Восстановить карточку", f"stre:{other.id}"))
         b.row(btn("Это другой человек", "stuf"))
-        b.row(btn("✖️ Отмена", SEC_STUDENTS))
+        b.row(*nav_row("stua"))
         await message.answer(text, reply_markup=b.as_markup())
         return
     await _ask_enrollment_year(message, state, name)
@@ -346,7 +386,7 @@ async def add_student_name(message: Message, state: FSMContext, repo: Repo) -> N
 async def _ask_enrollment_year(target: CallbackQuery | Message, state: FSMContext, name: str) -> None:
     await state.update_data(new_name=name)
     await state.set_state(StudentSG.add_year)
-    await respond(target, f"Имя: <b>{esc(name)}</b>\n\nГод поступления? Например: <code>2023</code>.", cancel_kb(SEC_STUDENTS))
+    await respond(target, f"Имя: <b>{esc(name)}</b>\n\nГод поступления? Например: <code>2023</code>.", back_kb("stua"))
 
 
 @router.callback_query(StudentSG.add_name, F.data == "stuf")
@@ -370,7 +410,7 @@ def _joined_prompt(today: date) -> str:
 def _joined_kb(prefix: str, today: date, back: str):
     b = InlineKeyboardBuilder()
     b.row(btn("Сегодня", f"{prefix}:{today.isoformat()}"))
-    b.row(*nav_row(back, back_text="✖️ Отмена"))
+    b.row(*nav_row(back))
     return b.as_markup()
 
 
@@ -392,7 +432,7 @@ def _choice_kb(prefix: str, options: list[str], *, skip_data: str, skip_label: s
     if row:
         b.row(*row)
     b.row(btn(skip_label, skip_data))
-    b.row(*nav_row(back, back_text="✖️ Отмена"))
+    b.row(*nav_row(back))
     return b.as_markup()
 
 
@@ -460,7 +500,7 @@ async def _ask_direction(target: CallbackQuery | Message, state: FSMContext, rep
     await respond(
         target,
         f"Имя: <b>{esc(name)}</b>\n\nНаправление? Выберите кнопку или напишите своё. Можно пропустить.",
-        _choice_kb("sad", options, skip_data="sad:skip", skip_label="Пропустить", back=SEC_STUDENTS),
+        _choice_kb("sad", options, skip_data="sad:skip", skip_label="Пропустить", back="stby"),
     )
 
 
@@ -471,7 +511,7 @@ async def _ask_track(target: CallbackQuery | Message, state: FSMContext, repo: R
     await respond(
         target,
         "Молитва или тфилин клуб? Это колонка «Направление» рядом с годом поступления в журнале. Можно пропустить.",
-        _choice_kb("sat", options, skip_data="sat:skip", skip_label="Пропустить", back=SEC_STUDENTS),
+        _choice_kb("sat", options, skip_data="sat:skip", skip_label="Пропустить", back="stbd"),
     )
 
 
@@ -482,14 +522,54 @@ async def _ask_group(target: CallbackQuery | Message, state: FSMContext, repo: R
     await respond(
         target,
         "Группа иудаики? Напишите, например <i>рав Исроэль Фельдшеров</i>, или выберите уже сохранённую. Можно пропустить.",
-        _choice_kb("sag", options, skip_data="sag:skip", skip_label="Пропустить", back=SEC_STUDENTS),
+        _choice_kb("sag", options, skip_data="sag:skip", skip_label="Пропустить", back="stbt"),
     )
 
 
 async def _ask_joined(target: CallbackQuery | Message, state: FSMContext, config: Config) -> None:
     await state.set_state(StudentSG.add_joined)
     today = local_today(config.timezone)
-    await respond(target, _joined_prompt(today), _joined_kb("stuj", today, SEC_STUDENTS))
+    await respond(target, _joined_prompt(today), _joined_kb("stuj", today, "stbg"))
+
+
+async def _require_new_name(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> str | None:
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+        return None
+    name = (await state.get_data()).get("new_name")
+    if not name:
+        await answer_callback(cb, "Начните добавление заново", show_alert=True)
+        await show_students_home(cb, repo)
+        return None
+    return str(name)
+
+
+@router.callback_query(F.data == "stby")
+async def add_back_to_year(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    name = await _require_new_name(cb, state, repo, actor)
+    if name is None:
+        return
+    await _ask_enrollment_year(cb, state, name)
+
+
+@router.callback_query(F.data == "stbd")
+async def add_back_to_direction(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    if await _require_new_name(cb, state, repo, actor) is None:
+        return
+    await _ask_direction(cb, state, repo)
+
+
+@router.callback_query(F.data == "stbt")
+async def add_back_to_track(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    if await _require_new_name(cb, state, repo, actor) is None:
+        return
+    await _ask_track(cb, state, repo)
+
+
+@router.callback_query(F.data == "stbg")
+async def add_back_to_group(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    if await _require_new_name(cb, state, repo, actor) is None:
+        return
+    await _ask_group(cb, state, repo)
 
 
 @router.message(StudentSG.add_year, F.text)
@@ -497,7 +577,7 @@ async def add_student_year(message: Message, state: FSMContext, repo: Repo) -> N
     try:
         year = parse_enrollment_year(message.text or "")
     except ValueError:
-        await message.answer("Год должен быть четырёхзначным, например <code>2023</code>.", reply_markup=cancel_kb(SEC_STUDENTS))
+        await message.answer("Год должен быть четырёхзначным, например <code>2023</code>.", reply_markup=back_kb("stua"))
         return
     await state.update_data(new_year=year)
     await _ask_direction(message, state, repo)
@@ -527,7 +607,7 @@ async def add_direction_text(message: Message, state: FSMContext, repo: Repo) ->
     try:
         value = _typed_profile(message.text or "", limit=DIRECTION_LIMIT, known=options)
     except ValueError as exc:
-        await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
+        await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT), reply_markup=back_kb("stby"))
         return
     await state.update_data(new_direction=value)
     await _ask_track(message, state, repo)
@@ -557,7 +637,7 @@ async def add_track_text(message: Message, state: FSMContext, repo: Repo) -> Non
     try:
         value = _typed_profile(message.text or "", limit=TRACK_LIMIT, known=options)
     except ValueError as exc:
-        await message.answer(_profile_error(exc, kind="Значение", limit=TRACK_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
+        await message.answer(_profile_error(exc, kind="Значение", limit=TRACK_LIMIT), reply_markup=back_kb("stbd"))
         return
     await state.update_data(new_track=value)
     await _ask_group(message, state, repo)
@@ -587,7 +667,7 @@ async def add_group_text(message: Message, state: FSMContext, config: Config) ->
     try:
         value = _typed_profile(message.text or "", limit=GROUP_LIMIT, known=options)
     except ValueError as exc:
-        await message.answer(_profile_error(exc, kind="Название группы", limit=GROUP_LIMIT), reply_markup=cancel_kb(SEC_STUDENTS))
+        await message.answer(_profile_error(exc, kind="Название группы", limit=GROUP_LIMIT), reply_markup=back_kb("stbt"))
         return
     await state.update_data(new_group=value)
     await _ask_joined(message, state, config)
@@ -621,7 +701,7 @@ async def _finish_add(target: CallbackQuery | Message, state: FSMContext, repo: 
         группа_иудаики=data.get("new_group"),
         учитывать_с=joined.strftime("%d.%m.%Y"),
     )
-    await show_student_card(target, repo, config, student.id, notice="Студент добавлен")
+    await show_student_card(target, repo, config, student.id, actor=actor, notice="Студент добавлен")
 
 
 @router.callback_query(StudentSG.add_joined, F.data.startswith("stuj:"))
@@ -634,7 +714,7 @@ async def add_student_joined_text(message: Message, state: FSMContext, repo: Rep
     try:
         day = parse_date_text(message.text or "", today=local_today(config.timezone))
     except ValueError:
-        await message.answer("Не понял дату. Пример: <code>01.09.2026</code>.")
+        await message.answer("Не понял дату. Пример: <code>01.09.2026</code>.", reply_markup=back_kb("stbg"))
         return
     await _finish_add(message, state, repo, config, actor, day)
 
@@ -654,7 +734,7 @@ async def import_start(cb: CallbackQuery, state: FSMContext, actor: Actor | None
         "Дальше можно указать направление, затем «молитва» или «тфилин клуб», и группу иудаики.\n\n"
         "<code>Иван Иванов, 2023, ПИН, молитва, рав Исроэль Фельдшеров\nПётр Петров, 2024</code>\n\n"
         f"До {MAX_IMPORT_LINES} строк за раз. Перед добавлением покажу, что получилось.",
-        cancel_kb(SEC_STUDENTS),
+        back_kb(SEC_STUDENTS),
     )
 
 
@@ -674,11 +754,11 @@ async def _render_import_preview(target: CallbackQuery | Message, state: FSMCont
         b = InlineKeyboardBuilder()
         b.row(btn(f"✅ Добавить {len(rows)}", "stic"))
         b.row(btn("📅 Другая дата учёта", "stid"))
-        b.row(btn("✖️ Отмена", SEC_STUDENTS))
+        b.row(*nav_row("stui"))
         markup = b.as_markup()
     else:
         text += "\n\nМожно прислать исправленный список ещё раз."
-        markup = cancel_kb(SEC_STUDENTS)
+        markup = back_kb("stui")
     await state.set_state(StudentSG.import_text)
     await respond(target, text, markup)
 
@@ -687,7 +767,7 @@ async def _render_import_preview(target: CallbackQuery | Message, state: FSMCont
 async def import_preview(message: Message, state: FSMContext, repo: Repo, config: Config) -> None:
     parsed = parse_student_lines(message.text or "")
     if not parsed:
-        await message.answer("Не нашёл ни одной строки со студентом.", reply_markup=cancel_kb(SEC_STUDENTS))
+        await message.answer("Не нашёл ни одной строки со студентом.", reply_markup=back_kb(SEC_STUDENTS))
         return
     all_students = await repo.list_students(active_only=False)
     existing = {s.full_name.casefold() for s in all_students if s.is_active}
@@ -729,7 +809,17 @@ async def import_preview(message: Message, state: FSMContext, repo: Repo, config
 @router.callback_query(StudentSG.import_text, F.data == "stid")
 async def import_pick_date(cb: CallbackQuery, state: FSMContext, config: Config) -> None:
     await state.set_state(StudentSG.import_date)
-    await respond(cb, _joined_prompt(local_today(config.timezone)), cancel_kb(SEC_STUDENTS))
+    await respond(cb, _joined_prompt(local_today(config.timezone)), back_kb("stip"))
+
+
+@router.callback_query(F.data == "stip")
+async def import_back_to_preview(cb: CallbackQuery, state: FSMContext, config: Config, actor: Actor | None) -> None:
+    if not await require_level(cb, actor, LEVEL_ASSIGNING_MARKER):
+        return
+    if "import_lines" not in await state.get_data():
+        await import_start(cb, state, actor)
+        return
+    await _render_import_preview(cb, state, config)
 
 
 @router.message(StudentSG.import_date, F.text)
@@ -737,7 +827,7 @@ async def import_date(message: Message, state: FSMContext, config: Config) -> No
     try:
         day = parse_date_text(message.text or "", today=local_today(config.timezone))
     except ValueError:
-        await message.answer("Не понял дату. Пример: <code>01.09.2026</code>.")
+        await message.answer("Не понял дату. Пример: <code>01.09.2026</code>.", reply_markup=back_kb("stip"))
         return
     await state.update_data(import_from=day.isoformat())
     await _render_import_preview(message, state, config)
@@ -790,10 +880,10 @@ async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
     back = f"stc:{student.id}"
     if field == "name":
         await state.set_state(StudentSG.edit_name)
-        await respond(cb, f"Текущее имя: <b>{esc(student.full_name)}</b>\n\nНовое ФИО?", cancel_kb(back))
+        await respond(cb, f"Текущее имя: <b>{esc(student.full_name)}</b>\n\nНовое ФИО?", back_kb(back))
     elif field == "year":
         await state.set_state(StudentSG.edit_year)
-        await respond(cb, f"Текущий год поступления: <b>{student.enrollment_year or '—'}</b>\n\nНовый год?", cancel_kb(back))
+        await respond(cb, f"Текущий год поступления: <b>{student.enrollment_year or '—'}</b>\n\nНовый год?", back_kb(back))
     elif field == "direction":
         options = await _direction_options(repo)
         await state.update_data(direction_options=options)
@@ -835,7 +925,7 @@ async def edit_student_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
             cb,
             f"Сейчас занятия учитываются с <b>{student.joined_date.strftime('%d.%m.%Y')}</b>.\n\n"
             "С какой даты учитывать? Например <code>01.09.2026</code>. Занятия до этой даты не войдут в статистику студента.",
-            cancel_kb(back),
+            back_kb(back),
         )
 
 
@@ -864,20 +954,20 @@ async def _apply_student_edit(
     before = getattr(student, field)
     await repo.update_student(student.id, **{field: value})
     await audit(repo, actor, "student.update", entity_type="student", entity_id=student.id, студент=student.full_name, поле=label, было=before, стало=value)
-    await show_student_card(target, repo, config, student.id)
+    await show_student_card(target, repo, config, student.id, actor=actor)
 
 
 @router.message(StudentSG.edit_name, F.text)
 async def edit_student_name(message: Message, state: FSMContext, repo: Repo, config: Config, actor: Actor) -> None:
     name = normalize_name(message.text or "")
-    if len(name.split()) < 2:
-        await message.answer("Нужны минимум фамилия и имя.")
-        return
     data = await state.get_data()
     student_id = int(data.get("edit_student_id") or 0)
+    back = back_kb(f"stc:{student_id}" if student_id else SEC_STUDENTS)
+    if len(name.split()) < 2:
+        await message.answer("Нужны минимум фамилия и имя.", reply_markup=back)
+        return
     other = await repo.find_student_by_name(name, active_only=False)
     if other is not None and other.id != student_id:
-        back = cancel_kb(f"stc:{student_id}") if student_id else cancel_kb(SEC_STUDENTS)
         if other.is_active:
             await message.answer(f"Студент <b>{esc(name)}</b> уже есть в группе.", reply_markup=back)
         else:
@@ -894,7 +984,11 @@ async def edit_student_year(message: Message, state: FSMContext, repo: Repo, con
     try:
         year = parse_enrollment_year(message.text or "")
     except ValueError:
-        await message.answer("Год должен быть четырёхзначным, например <code>2023</code>.")
+        student_id = int((await state.get_data()).get("edit_student_id") or 0)
+        await message.answer(
+            "Год должен быть четырёхзначным, например <code>2023</code>.",
+            reply_markup=back_kb(f"stc:{student_id}" if student_id else SEC_STUDENTS),
+        )
         return
     await _apply_student_edit(message, state, repo, config, actor, "enrollment_year", year, "год поступления")
 
@@ -920,7 +1014,11 @@ async def edit_direction_text(message: Message, state: FSMContext, repo: Repo, c
     try:
         value = _typed_profile(message.text or "", limit=DIRECTION_LIMIT, known=options)
     except ValueError as exc:
-        await message.answer(_profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT))
+        student_id = int((await state.get_data()).get("edit_student_id") or 0)
+        await message.answer(
+            _profile_error(exc, kind="Направление", limit=DIRECTION_LIMIT),
+            reply_markup=back_kb(f"stc:{student_id}" if student_id else SEC_STUDENTS),
+        )
         return
     await _apply_student_edit(message, state, repo, config, actor, "direction", value, "направление")
 
@@ -946,7 +1044,11 @@ async def edit_track_text(message: Message, state: FSMContext, repo: Repo, confi
     try:
         value = _typed_profile(message.text or "", limit=TRACK_LIMIT, known=options)
     except ValueError as exc:
-        await message.answer(_profile_error(exc, kind="Значение", limit=TRACK_LIMIT))
+        student_id = int((await state.get_data()).get("edit_student_id") or 0)
+        await message.answer(
+            _profile_error(exc, kind="Значение", limit=TRACK_LIMIT),
+            reply_markup=back_kb(f"stc:{student_id}" if student_id else SEC_STUDENTS),
+        )
         return
     await _apply_student_edit(message, state, repo, config, actor, "track", value, "молитва / тфилин")
 
@@ -972,7 +1074,11 @@ async def edit_group_text(message: Message, state: FSMContext, repo: Repo, confi
     try:
         value = _typed_profile(message.text or "", limit=GROUP_LIMIT, known=options)
     except ValueError as exc:
-        await message.answer(_profile_error(exc, kind="Название группы", limit=GROUP_LIMIT))
+        student_id = int((await state.get_data()).get("edit_student_id") or 0)
+        await message.answer(
+            _profile_error(exc, kind="Название группы", limit=GROUP_LIMIT),
+            reply_markup=back_kb(f"stc:{student_id}" if student_id else SEC_STUDENTS),
+        )
         return
     await _apply_student_edit(message, state, repo, config, actor, "judaica_group", value, "группа иудаики")
 
@@ -982,7 +1088,11 @@ async def edit_student_joined(message: Message, state: FSMContext, repo: Repo, c
     try:
         day = parse_date_text(message.text or "", today=local_today(config.timezone))
     except ValueError:
-        await message.answer("Не понял дату. Пример: <code>01.09.2026</code>.")
+        student_id = int((await state.get_data()).get("edit_student_id") or 0)
+        await message.answer(
+            "Не понял дату. Пример: <code>01.09.2026</code>.",
+            reply_markup=back_kb(f"stc:{student_id}" if student_id else SEC_STUDENTS),
+        )
         return
     await _apply_student_edit(message, state, repo, config, actor, "joined_on", day.isoformat(), "учитывать с")
 
@@ -1003,7 +1113,7 @@ async def remove_student_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None)
         f"Удалить <b>{esc(student.full_name)}</b> из группы?\n\n"
         "История посещений сохранится: в отчётах за месяцы, когда студент числился, он останется. "
         "Из списка отметок пропадёт, занятия после сегодняшнего дня ему считаться не будут. Роль будет снята.",
-        confirm_kb(f"stdc:{student.id}", f"stc:{student.id}", yes_text="🗑 Удалить"),
+        confirm_kb(f"stdc:{student.id}", f"stc:{student.id}", yes_text="🗑 Удалить", no_text="⬅️ Назад"),
     )
 
 
@@ -1069,7 +1179,7 @@ async def restore_student(cb: CallbackQuery, state: FSMContext, repo: Repo, conf
         return
     await repo.restore_student(student.id)
     await audit(repo, actor, "student.restore", entity_type="student", entity_id=student.id, студент=student.full_name)
-    await show_student_card(cb, repo, config, student.id, notice="Восстановлен")
+    await show_student_card(cb, repo, config, student.id, actor=actor, notice="Восстановлен")
 
 
 @router.callback_query(F.data.startswith("stunl:"))
@@ -1083,7 +1193,7 @@ async def unlink_ask(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None
     await respond(
         cb,
         f"Отвязать Telegram от <b>{esc(student.full_name)}</b>? Роль будет снята, потребуется новая верификация.",
-        confirm_kb(f"stunlc:{student.id}", f"stc:{student.id}", yes_text="🔓 Отвязать"),
+        confirm_kb(f"stunlc:{student.id}", f"stc:{student.id}", yes_text="🔓 Отвязать", no_text="⬅️ Назад"),
     )
 
 
@@ -1104,7 +1214,7 @@ async def unlink(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | N
         return
     await repo.unbind_telegram(student.id)
     await audit(repo, actor, "student.unlink", entity_type="student", entity_id=student.id, студент=student.full_name, telegram_id=student.telegram_id)
-    await show_student_card(cb, repo, config, student.id, notice="Telegram отвязан")
+    await show_student_card(cb, repo, config, student.id, actor=actor, notice="Telegram отвязан")
 
 
 # ------------------------------------------------------------ verification
@@ -1112,17 +1222,17 @@ async def unlink(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor | N
 
 @router.callback_query(F.data == SEC_VERIFY)
 async def open_verify(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: Actor | None) -> None:
+    """Old menu buttons still open the link list."""
     if not await require_level(cb, actor, LEVEL_MARKER):
         return
+    assert actor is not None
+    await state.clear()
     await show_student_picker(
         cb,
         state,
         repo,
         ctx=VERIFY_CTX,
-        title=(
-            "🔗 <b>Верификация</b>\n"
-            "Выберите студента. Подтверждённые отмечены ✅: нажмите, чтобы отвязать текущий Telegram и выдать новую ссылку."
-        ),
+        title=_MARKER_STUDENTS_TITLE,
         back=NAV_MAIN,
         mark_verified=True,
     )
@@ -1173,7 +1283,8 @@ async def show_verified_rebind(cb: CallbackQuery, repo: Repo, config: Config, ac
     else:
         lines.append("")
         lines.append("Отвязать может тот, кто выше по роли.")
-    b.row(*nav_row(SEC_VERIFY))
+    back = f"stc:{student.id}" if actor.can_manage_students else SEC_STUDENTS
+    b.row(*nav_row(back))
     await respond(cb, "\n".join(lines), b.as_markup())
 
 
@@ -1207,7 +1318,7 @@ async def rebind_ask(cb: CallbackQuery, repo: Repo, config: Config, actor: Actor
         cb,
         f"Отвязать Telegram от <b>{esc(student.full_name)}</b> и выдать новую ссылку?\n\n"
         "Роль будет снята. Старый аккаунт потеряет доступ к карточке.",
-        confirm_kb(f"vrc:{student.id}", f"vrb:{student.id}", yes_text="🔓 Отвязать"),
+        confirm_kb(f"vrc:{student.id}", f"vrb:{student.id}", yes_text="🔓 Отвязать", no_text="⬅️ Назад"),
     )
 
 
@@ -1266,6 +1377,9 @@ async def issue_link(cb: CallbackQuery, repo: Repo, bot: Bot, actor: Actor | Non
         "Перешлите её студенту. Ссылка одноразовая; предыдущие ссылки для этого студента отозваны."
     )
     b = InlineKeyboardBuilder()
-    b.row(btn("🔗 Ещё студент", SEC_VERIFY))
-    b.row(*nav_row())
+    if actor.can_manage_students:
+        b.row(btn("🔗 Ещё студент", "stul"))
+        b.row(*nav_row(f"stc:{student.id}"))
+    else:
+        b.row(*nav_row(SEC_STUDENTS))
     await respond(cb, text, b.as_markup())
