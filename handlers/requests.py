@@ -596,7 +596,7 @@ async def _request_text(repo: Repo, config: Config, req: Request) -> str:
 
 async def show_requests_list(target: CallbackQuery | Message, repo: Repo, *, resolved: bool = False, page: int = 0) -> None:
     if resolved:
-        items = await repo.list_requests(status=None, closed_only=True, hide_cancelled=True, limit=200)
+        items = await repo.list_requests(status=None, closed_only=True, limit=200)
         title = "📁 <b>Обработанные запросы</b>"
         page_prefix = "rqhp"
     else:
@@ -610,7 +610,7 @@ async def show_requests_list(target: CallbackQuery | Message, repo: Repo, *, res
         event = await repo.get_event(req.event_id)
         name = truncate(student.full_name, 22) if student else "?"
         ev = f"{event.day.strftime('%d.%m')} {truncate(event.title, 14)}" if event else "?"
-        icon = {"approved": "✅", "rejected": "❌"}.get(req.status, "•")
+        icon = {"approved": "✅", "rejected": "❌", "cancelled": "↩️"}.get(req.status, "•")
         b.row(btn(f"{icon} {name} · {ev}", f"rq:{req.id}"))
     if pages > 1:
         b.row(*pager_row(page_prefix, page, pages))

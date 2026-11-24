@@ -898,7 +898,10 @@ async def test_student_can_cancel_an_open_request(h: Harness):
     await h.text(MARKER, "/menu")
     await h.click(MARKER, "s:req")
     await h.press(MARKER, "Обработанные")
-    assert not any("Лекция" in label for label in h.buttons())
+    assert any("↩️" in label and "Лекция" in label for label in h.buttons())
+    await h.press(MARKER, "Лекция")
+    assert "отменён" in h.last_text()
+    await h.press(MARKER, "Назад")
     await h.click(MARKER, f"rqa:{((await h.repo.list_requests(status=None, student_id=student.id))[0]).id}")
     assert h.session.last("AnswerCallbackQuery").text == "Запрос уже обработан."
 
