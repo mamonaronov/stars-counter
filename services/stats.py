@@ -5,7 +5,7 @@ percent = (attended mandatory + attended free + excused misses) / mandatory tota
 * free events a student skipped are ignored, so the percentage can exceed 100;
   a free event covered by sick leave counts as an excused visit;
 * mandatory events missed during an active sick leave or an approved absence count
-  as attended; an open sick leave has no end date and covers every day from its start;
+  as attended; an open sick leave or approved absence has no end date and covers every day from its start;
 * an approved absence does not cover free events;
 * only events on/after the student's ``joined_on`` (and before ``left_on``) are counted.
 """

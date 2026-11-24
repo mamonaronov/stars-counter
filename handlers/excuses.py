@@ -1,6 +1,6 @@
 """Sick leaves and approved absences: missed mandatory events in the range count as attended.
 
-An open sick leave has no end date and covers every day from its start until it is closed.
+An open sick leave or approved absence has no end date and covers every day from its start until it is closed.
 """
 
 from __future__ import annotations
@@ -41,71 +41,90 @@ def _range(excuse: Excuse) -> str:
 
 EXCUSE_PAGE = 8
 
-EXCUSE_VIEWS = ("open", "closed", "leave")
-_VIEW_LABEL = {"open": "Открытые", "closed": "Закрытые", "leave": "Отпросы"}
-_VIEW_HINT = {
-    "open": "Открытый больничный действует с даты начала, пока его не закроют.",
-    "closed": "Закрытый больничный покрывает только дни внутри указанных дат.",
-    "leave": "Пропуски обязательных занятий за период отпроса считаются посещёнными.",
+_STATUSES = ("open", "closed")
+_KINDS = ("all", "sick", "leave")
+_STATUS_LABEL = {"open": "Открытые", "closed": "Закрытые"}
+_KIND_LABEL = {"all": "Все", "sick": "🤒 Больничные", "leave": "📝 Отпросы"}
+_STATUS_HINT = {
+    "open": "Действуют с даты начала, пока их не закроют.",
+    "closed": "Покрывают только дни внутри указанных дат.",
 }
-_VIEW_EMPTY = {
-    "open": "Открытых больничных нет.",
-    "closed": "Закрытых больничных нет.",
-    "leave": "Отпросов нет.",
-}
-
-
-def _excuse_view(excuse: Excuse) -> str:
-    if excuse.kind == "leave":
-        return "leave"
-    return "open" if excuse.is_open else "closed"
+_KIND_NAME = {"all": "записей", "sick": "больничных", "leave": "отпросов"}
+_STATUS_NAME = {"open": "Открытых", "closed": "Закрытых"}
 
 
 def _tab(text: str, on: bool) -> str:
     return f"[{text}]" if on else text
 
 
-async def show_excuses(target: CallbackQuery | Message, repo: Repo, page: int = 0, *, view: str = "open") -> None:
-    if view not in EXCUSE_VIEWS:
-        view = "open"
+def _is_status(excuse: Excuse, status: str) -> bool:
+    return excuse.is_open if status == "open" else not excuse.is_open
+
+
+def _is_kind(excuse: Excuse, kind: str) -> bool:
+    return kind == "all" or excuse.kind == kind
+
+
+def _filters(data: str) -> tuple[str, str, int]:
+    """Status, kind and page from a list callback. Old buttons without a kind still open."""
+    status, kind, page = "open", "all", 0
+    tokens = data.split(":")[1:]
+    if tokens and tokens[0] in _STATUSES:
+        status = tokens.pop(0)
+    elif tokens and tokens[0] == "leave":
+        kind = "leave"
+        tokens.pop(0)
+    if tokens and tokens[0] in _KINDS:
+        kind = tokens.pop(0)
+    if tokens and tokens[0].isdigit():
+        page = int(tokens[0])
+    return status, kind, page
+
+
+async def show_excuses(
+    target: CallbackQuery | Message,
+    repo: Repo,
+    page: int = 0,
+    *,
+    status: str = "open",
+    kind: str = "all",
+) -> None:
+    if status not in _STATUSES:
+        status = "open"
+    if kind not in _KINDS:
+        kind = "all"
     items = await repo.list_excuses(active_only=True)
-    grouped = {name: [excuse for excuse in items if _excuse_view(excuse) == name] for name in EXCUSE_VIEWS}
-    current = grouped[view]
+    in_status = [excuse for excuse in items if _is_status(excuse, status)]
+    current = [excuse for excuse in in_status if _is_kind(excuse, kind)]
     pages = max(1, (len(current) + EXCUSE_PAGE - 1) // EXCUSE_PAGE)
     page = max(0, min(page, pages - 1))
+    open_count = sum(1 for excuse in items if excuse.is_open and _is_kind(excuse, kind))
+    closed_count = sum(1 for excuse in items if not excuse.is_open and _is_kind(excuse, kind))
     b = InlineKeyboardBuilder()
     b.row(
-        btn(_tab(f"Открытые ({len(grouped['open'])})", view == "open"), "excv:open"),
-        btn(_tab(f"Закрытые ({len(grouped['closed'])})", view == "closed"), "excv:closed"),
+        btn(_tab(f"Открытые ({open_count})", status == "open"), f"excv:open:{kind}"),
+        btn(_tab(f"Закрытые ({closed_count})", status == "closed"), f"excv:closed:{kind}"),
     )
-    b.row(btn(_tab(f"Отпросы ({len(grouped['leave'])})", view == "leave"), "excv:leave"))
+    b.row(
+        btn(_tab(f"Все ({len(in_status)})", kind == "all"), f"excv:{status}:all"),
+        btn(_tab(f"Больничные ({sum(1 for excuse in in_status if excuse.kind == 'sick')})", kind == "sick"), f"excv:{status}:sick"),
+        btn(_tab(f"Отпросы ({sum(1 for excuse in in_status if excuse.kind == 'leave')})", kind == "leave"), f"excv:{status}:leave"),
+    )
     for excuse in current[page * EXCUSE_PAGE : (page + 1) * EXCUSE_PAGE]:
         student = await repo.get_student(excuse.student_id)
-        name = truncate(student.full_name, 28) if student else "?"
-        b.row(btn(f"{KIND_ICON.get(excuse.kind, '•')} {name} · {_range(excuse)}", f"exc:{excuse.id}"))
+        name = truncate(student.full_name, 22) if student else "?"
+        b.row(btn(f"{KIND_ICON.get(excuse.kind, '•')} {name} · {_range(excuse)}", f"exc:{excuse.id}:{status}:{kind}"))
     if pages > 1:
-        b.row(*pager_row(f"excp:{view}", page, pages))
+        b.row(*pager_row(f"excp:{status}:{kind}", page, pages))
     b.row(btn("➕ Добавить", "exca"))
     b.row(*nav_row())
-    text = (
-        "🩺 <b>Больничные и отпросы</b>\n\n"
-        f"<b>{_VIEW_LABEL[view]}</b>\n"
-        f"{_VIEW_HINT[view]}"
-    )
+    title = _STATUS_LABEL[status]
+    if kind != "all":
+        title += f" · {_KIND_LABEL[kind]}"
+    text = f"🩺 <b>Больничные и отпросы</b>\n\n<b>{title}</b>\n{_STATUS_HINT[status]}"
     if not current:
-        text += f"\n\n{_VIEW_EMPTY[view]}"
+        text += f"\n\n{_STATUS_NAME[status]} {_KIND_NAME[kind]} нет."
     await respond(target, text, b.as_markup())
-
-
-def _parse_excuse_list(data: str) -> tuple[str, int]:
-    parts = data.split(":")
-    if len(parts) >= 3 and parts[1] in EXCUSE_VIEWS and parts[2].isdigit():
-        return parts[1], int(parts[2])
-    if len(parts) >= 2 and parts[1] in EXCUSE_VIEWS:
-        return parts[1], 0
-    if len(parts) >= 2 and parts[1].isdigit():
-        return "open", int(parts[1])
-    return "open", 0
 
 
 @router.callback_query(F.data == SEC_EXCUSES)
@@ -121,16 +140,16 @@ async def excuses_view(cb: CallbackQuery, state: FSMContext, repo: Repo, actor: 
     if not await require_level(cb, actor):
         return
     await state.clear()
-    view, page = _parse_excuse_list(cb.data)
-    await show_excuses(cb, repo, page, view=view)
+    status, kind, page = _filters(cb.data)
+    await show_excuses(cb, repo, page, status=status, kind=kind)
 
 
 @router.callback_query(F.data.startswith("excp:"))
 async def excuses_page(cb: CallbackQuery, repo: Repo, actor: Actor | None) -> None:
     if not await require_level(cb, actor):
         return
-    view, page = _parse_excuse_list(cb.data)
-    await show_excuses(cb, repo, page, view=view)
+    status, kind, page = _filters(cb.data)
+    await show_excuses(cb, repo, page, status=status, kind=kind)
 
 
 @router.callback_query(F.data == "exca")
@@ -173,15 +192,14 @@ async def _ask_date_to(target: CallbackQuery | Message, state: FSMContext, day: 
     data = await state.get_data()
     await state.update_data(exc_from=day.isoformat())
     await state.set_state(ExcuseSG.date_to)
-    sick = data.get("exc_kind") == "sick"
     b = InlineKeyboardBuilder()
     b.row(btn("Только этот день", f"exdt:{day.isoformat()}"))
-    if sick:
-        b.row(btn("Открытый", "exopen"))
+    b.row(btn("Открытый", "exopen"))
     b.row(*nav_row(SEC_EXCUSES))
-    text = f"С {day.strftime('%d.%m.%Y')}.\n\nПо какую дату (включительно)?"
-    if sick:
-        text += " «Открытый» — пока без даты окончания, её можно указать позже."
+    text = (
+        f"С {day.strftime('%d.%m.%Y')}.\n\nПо какую дату (включительно)? "
+        "«Открытый» — пока без даты окончания, её можно указать позже."
+    )
     await respond(target, text, b.as_markup())
 
 
@@ -206,10 +224,7 @@ async def _ask_comment(target: CallbackQuery | Message, state: FSMContext, day_t
     if day_to is not None and day_to < day_from:
         await respond(target, "Дата окончания раньше даты начала. Введите дату окончания ещё раз.", cancel_kb(SEC_EXCUSES))
         return
-    if day_to is None and data.get("exc_kind") != "sick":
-        await respond(target, "У отпроса нужна дата окончания.", cancel_kb(SEC_EXCUSES))
-        return
-    # Empty string survives FSM storage; NULL in the database means the sick leave is still open.
+    # Empty string survives FSM storage; NULL in the database means the record is still open.
     await state.update_data(exc_to="" if day_to is None else day_to.isoformat())
     await state.set_state(ExcuseSG.comment)
     b = InlineKeyboardBuilder()
@@ -275,7 +290,16 @@ async def add_excuse_comment(message: Message, state: FSMContext, repo: Repo, co
     await _create(message, state, repo, config, actor, comment or None)
 
 
-async def show_excuse_card(target: CallbackQuery | Message, repo: Repo, config: Config, excuse_id: int, *, notice: str | None = None) -> None:
+async def show_excuse_card(
+    target: CallbackQuery | Message,
+    repo: Repo,
+    config: Config,
+    excuse_id: int,
+    *,
+    status: str | None = None,
+    kind: str | None = None,
+    notice: str | None = None,
+) -> None:
     excuse = await repo.get_excuse(excuse_id)
     if excuse is None:
         if isinstance(target, CallbackQuery):
@@ -297,7 +321,9 @@ async def show_excuse_card(target: CallbackQuery | Message, repo: Repo, config: 
         b.row(btn("📅 Закрыть", f"exclose:{excuse.id}"))
     if excuse.is_active:
         b.row(btn("❌ Отменить", f"excc:{excuse.id}"))
-    b.row(*nav_row(f"excv:{_excuse_view(excuse)}"))
+    back_status = status if status in _STATUSES else ("open" if excuse.is_open else "closed")
+    back_kind = kind if kind in _KINDS else "all"
+    b.row(*nav_row(f"excv:{back_status}:{back_kind}"))
     await respond(target, "\n".join(lines), b.as_markup(), notice=notice)
 
 
@@ -306,7 +332,10 @@ async def excuse_card(cb: CallbackQuery, state: FSMContext, repo: Repo, config: 
     if not await require_level(cb, actor):
         return
     await state.clear()
-    await show_excuse_card(cb, repo, config, int(cb.data.split(":", 1)[1]))
+    parts = cb.data.split(":")
+    status = parts[2] if len(parts) > 2 and parts[2] in _STATUSES else None
+    kind = parts[3] if len(parts) > 3 and parts[3] in _KINDS else None
+    await show_excuse_card(cb, repo, config, int(parts[1]), status=status, kind=kind)
 
 
 @router.callback_query(F.data.startswith("excc:"))
@@ -361,7 +390,7 @@ async def _close_excuse(target: CallbackQuery | Message, state: FSMContext, repo
     await state.clear()
     if closed is None:
         if isinstance(target, CallbackQuery):
-            await answer_callback(target, "Больничный уже закрыт или отменён", show_alert=True)
+            await answer_callback(target, "Запись уже закрыта или отменена", show_alert=True)
         await show_excuse_card(target, repo, config, excuse_id)
         return
     student = await repo.get_student(closed.student_id)
@@ -374,7 +403,8 @@ async def _close_excuse(target: CallbackQuery | Message, state: FSMContext, repo
         студент=student.full_name if student else None,
         период=_range(closed),
     )
-    await show_excuse_card(target, repo, config, closed.id, notice="Больничный закрыт")
+    title = EXCUSE_TITLES.get(closed.kind, "запись")
+    await show_excuse_card(target, repo, config, closed.id, notice=f"{title.capitalize()} закрыт")
 
 
 @router.callback_query(F.data.startswith("exclose:"))
@@ -382,16 +412,17 @@ async def close_excuse_start(cb: CallbackQuery, state: FSMContext, repo: Repo, c
     if not await require_level(cb, actor):
         return
     excuse = await repo.get_excuse(int(cb.data.split(":", 1)[1]))
-    if excuse is None or not excuse.is_active or not excuse.is_open or excuse.kind != "sick":
-        await answer_callback(cb, "Больничный уже закрыт или отменён", show_alert=True)
+    if excuse is None or not excuse.is_active or not excuse.is_open:
+        await answer_callback(cb, "Запись уже закрыта или отменена", show_alert=True)
         return
     await state.clear()
     await state.set_state(ExcuseSG.close_on)
     await state.update_data(exc_close_id=excuse.id, exc_from=excuse.date_from)
     start = date.fromisoformat(excuse.date_from).strftime("%d.%m.%Y")
+    title = EXCUSE_TITLES.get(excuse.kind, "запись")
     await respond(
         cb,
-        f"Открытый больничный с {start}.\n\nПо какую дату закрыть (включительно)?",
+        f"Открытый {title} с {start}.\n\nПо какую дату закрыть (включительно)?",
         _close_keyboard(excuse.id, local_today(config.timezone)),
     )
 

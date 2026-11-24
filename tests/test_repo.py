@@ -164,8 +164,10 @@ async def test_requests_and_excuses(repo: Repo):
     assert opened.is_open and opened.date_to is None
     assert opened.covers(date(2026, 9, 10)) and opened.covers(date(2026, 12, 1))
     assert not opened.covers(date(2026, 9, 9))
-    with pytest.raises(ValueError):
-        await repo.create_excuse(s.id, "leave", "2026-09-10", None, None, 1)
+    opened_leave = await repo.create_excuse(s.id, "leave", "2026-09-10", None, None, 1)
+    assert opened_leave.is_open and opened_leave.covers(date(2026, 12, 1))
+    closed_leave = await repo.close_excuse(opened_leave.id, "2026-09-15")
+    assert closed_leave is not None and closed_leave.date_to == "2026-09-15" and not closed_leave.is_open
     closed = await repo.close_excuse(opened.id, "2026-09-12")
     assert closed is not None and closed.date_to == "2026-09-12" and not closed.is_open
     assert closed.covers(date(2026, 9, 12)) and not closed.covers(date(2026, 9, 13))

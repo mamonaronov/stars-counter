@@ -158,7 +158,7 @@ class Excuse:
 
     @property
     def is_open(self) -> bool:
-        """Sick leave with no end date yet. Covers every day from the start onward."""
+        """Sick leave or approved absence with no end date yet. Covers every day from the start onward."""
         return self.date_to is None
 
     def covers(self, day: date) -> bool:

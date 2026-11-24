@@ -806,8 +806,8 @@ class Repo:
         comment: str | None,
         created_by: int,
     ) -> Excuse:
-        if date_to is None and kind != "sick":
-            raise ValueError("only a sick leave can stay open")
+        if date_to is None and kind not in {"sick", "leave"}:
+            raise ValueError("only a sick leave or an approved absence can stay open")
         new_id = await self._execute(
             """
             INSERT INTO excuses (student_id, kind, date_from, date_to, comment, created_by, created_at)
@@ -843,12 +843,12 @@ class Repo:
         )
 
     async def close_excuse(self, excuse_id: int, date_to: str) -> Excuse | None:
-        """Set the end date of an open sick leave. None when it is not open."""
+        """Set the end date of an open sick leave or approved absence. None when it is not open."""
         written = await self._write(
             """
             UPDATE excuses
             SET date_to = ?
-            WHERE id = ? AND kind = 'sick' AND date_to IS NULL AND cancelled_at IS NULL
+            WHERE id = ? AND date_to IS NULL AND cancelled_at IS NULL
             """,
             (date_to, excuse_id),
         )

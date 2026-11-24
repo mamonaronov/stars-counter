@@ -41,7 +41,7 @@ ACTION_TITLES: dict[str, str] = {
     "role.revoke": "снял роль",
     "role.transfer": "передал роль",
     "excuse.add": "добавил больничный/отпрос",
-    "excuse.close": "закрыл больничный",
+    "excuse.close": "закрыл больничный/отпрос",
     "excuse.cancel": "отменил больничный/отпрос",
     "broadcast.send": "отправил сообщение пользователям",
     "request.create": "отправил запрос отмечающему",
