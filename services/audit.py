@@ -45,6 +45,7 @@ ACTION_TITLES: dict[str, str] = {
     "excuse.cancel": "отменил больничный/отпрос",
     "broadcast.send": "отправил сообщение пользователям",
     "request.create": "отправил запрос отмечающему",
+    "request.cancel": "отменил свой запрос отмечающему",
     "request.approve": "одобрил запрос",
     "request.reject": "отклонил запрос",
     "report.export": "выгрузил отчёт",

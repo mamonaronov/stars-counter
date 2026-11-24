@@ -48,6 +48,7 @@ class ExcuseSG(StatesGroup):
 
 
 class RequestSG(StatesGroup):
+    events = State()
     text = State()
 
 

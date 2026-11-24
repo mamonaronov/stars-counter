@@ -23,6 +23,7 @@ from utils.callbacks import (
     SEC_LOGS,
     SEC_MONTHS,
     SEC_MY,
+    SEC_MY_REQUESTS,
     SEC_NEW_EVENT,
     SEC_NEW_REQUEST,
     SEC_REPORT_PREV,
@@ -95,11 +96,16 @@ def confirm_kb(yes: str, no: str, *, yes_text: str = "✅ Подтвердить
     return b.as_markup()
 
 
-def main_menu(actor: Actor | None, *, open_requests: int = 0) -> InlineKeyboardMarkup:
+def main_menu(
+    actor: Actor | None,
+    *,
+    open_requests: int = 0,
+) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     level = actor.level if actor else 0
     if actor is not None and actor.is_linked:
         b.row(btn("👤 Моя посещаемость", SEC_MY), btn("✉️ Запрос отмечающему", SEC_NEW_REQUEST))
+        b.row(btn("📂 Мои запросы", SEC_MY_REQUESTS))
     b.row(btn("📊 Посещаемость студентов", SEC_ATTENDANCE))
     b.row(
         btn("📑 Отчёт за текущий месяц", SEC_REPORTS),

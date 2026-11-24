@@ -157,12 +157,12 @@ async def refresh_private_screens(
 
 
 async def _menu_for(repo: Repo, config: Config, telegram_id: int):
-    from handlers.common import menu_text
+    from handlers.common import menu_text, queue_counts
     from keyboards.main import main_menu
     from middlewares import build_actor
 
     actor = await build_actor(repo, config, telegram_id)
-    open_requests = await repo.count_open_requests() if actor.can_mark else 0
+    open_requests = await queue_counts(repo, actor)
     return menu_text(actor, config), main_menu(actor, open_requests=open_requests)
 
 

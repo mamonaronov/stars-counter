@@ -49,6 +49,13 @@ def menu_text(actor: Actor | None, config: Config) -> str:
     return "\n".join(lines)
 
 
+async def queue_counts(repo: Repo, actor: Actor | None) -> int:
+    """Open attendance requests, for the staff menu."""
+    if actor is None or not actor.can_mark:
+        return 0
+    return await repo.count_open_requests()
+
+
 async def show_main(
     target: CallbackQuery | Message,
     actor: Actor | None,
@@ -60,9 +67,7 @@ async def show_main(
 ) -> None:
     if state is not None:
         await state.clear()
-    open_requests = 0
-    if actor is not None and actor.can_mark:
-        open_requests = await repo.count_open_requests()
+    open_requests = await queue_counts(repo, actor)
     text = menu_text(actor, config)
     markup = main_menu(actor, open_requests=open_requests)
     if isinstance(target, CallbackQuery):

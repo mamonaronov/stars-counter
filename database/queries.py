@@ -856,6 +856,7 @@ class Repo:
             return None
         return await self.get_excuse(excuse_id)
 
+    # -------------------------------------------------------- excuse requests
     # --------------------------------------------------------------- requests
 
     async def create_request(self, student_id: int, event_id: int, text: str) -> Request | None:
@@ -879,6 +880,7 @@ class Repo:
         *,
         status: str | None = "open",
         closed_only: bool = False,
+        hide_cancelled: bool = False,
         student_id: int | None = None,
         limit: int = 200,
     ) -> list[Request]:
@@ -890,6 +892,8 @@ class Repo:
         elif status:
             clauses.append("status = ?")
             params.append(status)
+        if hide_cancelled:
+            clauses.append("status != 'cancelled'")
         if student_id is not None:
             clauses.append("student_id = ?")
             params.append(student_id)
@@ -909,6 +913,27 @@ class Repo:
             (student_id, event_id),
         )
         return row is not None
+
+    async def open_request_event_ids(self, student_id: int) -> set[int]:
+        rows = await self._fetchall(
+            "SELECT event_id FROM requests WHERE student_id = ? AND status = 'open'",
+            (student_id,),
+        )
+        return {int(row[0]) for row in rows}
+
+    async def cancel_request(self, request_id: int, student_id: int, cancelled_by: int) -> Request | None:
+        """The student withdraws their own open request. None when it is not theirs or already closed."""
+        written = await self._write(
+            """
+            UPDATE requests
+            SET status = 'cancelled', resolved_by = ?, resolved_at = ?, resolution_comment = NULL
+            WHERE id = ? AND student_id = ? AND status = 'open'
+            """,
+            (cancelled_by, to_iso(now_utc()), request_id, student_id),
+        )
+        if written.rowcount != 1:
+            return None
+        return await self.get_request(request_id)
 
     async def resolve_request(self, request_id: int, status: str, resolved_by: int, comment: str | None) -> Request | None:
         """Close an open request. Returns None when another marker already resolved it."""

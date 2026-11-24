@@ -372,6 +372,7 @@ async def test_full_flow(h: Harness):
     await h.click(STUDENT, "s:nreq")
     await h.press(STUDENT, "Текущий")
     await h.press(STUDENT, "10.09")
+    await h.press(STUDENT, "Далее")
     await h.text(STUDENT, "Я был, сидел сзади")
     assert any("Новый запрос" in m for m in h.session.messages_to(MARKER))
     await h.text(MARKER, "/menu")
@@ -775,6 +776,136 @@ async def test_student_card_toggles_attendance_by_event(h: Harness):
     await h.press(MARKER, "Лекция")
     assert await h.repo.is_present(september.id, student.id)
     assert "Семинар" not in h.last_text()
+
+
+async def test_student_requests_several_events_and_sees_open_and_closed(h: Harness):
+    student = await h.repo.create_student("Сидоров Сидор", 2023, "2026-09-01", SUPER)
+    other = await h.repo.create_student("Чужой Чужак", 2023, "2026-09-01", SUPER)
+    marker = await h.repo.create_student("Отмечающий Марк", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(student.id, STUDENT)
+    await h.repo.bind_telegram(marker.id, MARKER)
+    await h.repo.set_role(marker.id, "marker")
+    lecture = await h.repo.create_event("Лекция", "mandatory", "2026-09-02", "10:00", None, MARKER)
+    seminar = await h.repo.create_event("Семинар", "mandatory", "2026-09-05", None, None, MARKER)
+    lesson = await h.repo.create_event("Урок", "mandatory", "2026-09-08", None, None, MARKER)
+
+    await h.text(STUDENT, "/menu")
+    assert h.buttons()["📂 Мои запросы"] == "s:mrq"
+    await h.click(STUDENT, "s:nreq")
+    await h.press(STUDENT, "Текущий")
+    await h.press(STUDENT, "Далее")
+    assert h.session.last("AnswerCallbackQuery").text == "Выберите хотя бы одно занятие."
+    await h.press(STUDENT, "Выбрать все")
+    assert "Далее · 3" in h.buttons()
+    assert "Снять все" in h.buttons()
+    await h.press(STUDENT, "08.09")
+    assert "Далее · 2" in h.buttons()
+    await h.press(STUDENT, "Далее")
+    assert "⬅️ Назад" in h.buttons()
+    assert "Лекция" in h.last_text() and "Семинар" in h.last_text() and "Урок" not in h.last_text()
+    await h.text(STUDENT, "был на обоих")
+    assert "Отправлено 2 запроса" in h.last_text() or any("Отправлено 2 запроса" in m for m in h.session.messages_to(STUDENT))
+    assert await h.repo.count_open_requests() == 2
+    notes = [m for m in h.session.messages_to(MARKER) if "Новый запрос" in m]
+    assert len(notes) == 1 and "Лекция" in notes[0] and "Семинар" in notes[0] and "Урок" not in notes[0]
+
+    await h.click(STUDENT, "s:nreq")
+    await h.press(STUDENT, "Текущий")
+    labels = list(h.buttons())
+    assert any(label.startswith("⏳") and "Лекция" in label for label in labels)
+    assert any(label.startswith("⏳") and "Семинар" in label for label in labels)
+    assert any("Урок" in label and not label.startswith(("⏳", "✅")) for label in labels)
+    await h.press(STUDENT, "Лекция")
+    assert "необработанный запрос" in (h.session.last("AnswerCallbackQuery").text or "")
+    await h.press(STUDENT, "Выбрать все")
+    assert "Далее · 1" in h.buttons()
+    await h.press(STUDENT, "Мои запросы")
+    assert "⬅️ Назад" in h.buttons()
+    assert "Лекция" in "".join(h.buttons()) and "Семинар" in "".join(h.buttons())
+    assert not any("Урок" in label for label in h.buttons())
+    await h.press(STUDENT, "Лекция")
+    assert "ожидает" in h.last_text() and "был на обоих" in h.last_text()
+    await h.press(STUDENT, "Назад")
+    await h.press(STUDENT, "Закрытые")
+    assert "Закрытых запросов нет." in h.last_text()
+
+    await h.text(MARKER, "/menu")
+    assert "📨 Запросы (2)" in h.buttons()
+    await h.click(MARKER, "s:mrq")
+    assert "Открытых запросов нет." in h.last_text()
+    assert not any("Лекция" in label for label in h.buttons())
+    await h.click(MARKER, "s:req")
+    await h.press(MARKER, "Лекция")
+    await h.press(MARKER, "✅ Отметить")
+    assert await h.repo.is_present(lecture.id, student.id)
+
+    await h.text(MARKER, "/menu")
+    await h.click(MARKER, "s:req")
+    await h.press(MARKER, "Семинар")
+    await h.press(MARKER, "❌ Отклонить")
+    await h.text(MARKER, "не было в списке")
+    assert not await h.repo.is_present(seminar.id, student.id)
+    assert not await h.repo.is_present(lesson.id, student.id)
+
+    await h.text(STUDENT, "/menu")
+    await h.click(STUDENT, "s:mrq")
+    assert "Открытых запросов нет." in h.last_text()
+    await h.press(STUDENT, "Закрытые")
+    await h.press(STUDENT, "Лекция")
+    assert "одобрен" in h.last_text()
+    await h.press(STUDENT, "Назад")
+    await h.press(STUDENT, "Семинар")
+    assert "отклонён" in h.last_text() and "не было в списке" in h.last_text()
+
+    foreign = await h.repo.create_request(other.id, lesson.id, "чужой")
+    assert foreign is not None
+    await h.click(STUDENT, f"mrqi:{foreign.id}")
+    assert h.session.last("AnswerCallbackQuery").text == "Запрос не найден"
+    assert [item.id for item in await h.repo.list_requests(status="open", student_id=student.id)] == []
+
+    await h.text(GUEST, "/start")
+    assert "📂 Мои запросы" not in h.buttons()
+    await h.click(GUEST, "s:mrq")
+    assert h.session.last("AnswerCallbackQuery").text == "Эта функция доступна только верифицированным студентам."
+
+
+async def test_student_can_cancel_an_open_request(h: Harness):
+    student = await h.repo.create_student("Сидоров Сидор", 2023, "2026-09-01", SUPER)
+    marker = await h.repo.create_student("Отмечающий Марк", 2023, "2026-09-01", SUPER)
+    await h.repo.bind_telegram(student.id, STUDENT)
+    await h.repo.bind_telegram(marker.id, MARKER)
+    await h.repo.set_role(marker.id, "marker")
+    event = await h.repo.create_event("Лекция", "mandatory", "2026-09-02", None, None, MARKER)
+
+    await h.text(STUDENT, "/menu")
+    await h.click(STUDENT, "s:nreq")
+    await h.press(STUDENT, "Текущий")
+    await h.press(STUDENT, "Лекция")
+    await h.press(STUDENT, "Далее")
+    await h.text(STUDENT, "ошибся")
+    await h.click(STUDENT, "s:mrq")
+    await h.press(STUDENT, "Лекция")
+    assert "Отменить запрос" in h.buttons()
+    await h.press(STUDENT, "Отменить запрос")
+    assert "Отменить запрос?" in h.last_text()
+    await h.press(STUDENT, "Да, отменить")
+    assert "отменён" in h.last_text()
+    assert h.session.last("AnswerCallbackQuery").text == "Отменено"
+    assert await h.repo.count_open_requests() == 0
+    assert not await h.repo.has_open_request(student.id, event.id)
+    assert any("отменил запрос" in m for m in h.session.messages_to(MARKER))
+
+    await h.text(MARKER, "/menu")
+    await h.click(MARKER, "s:req")
+    await h.press(MARKER, "Обработанные")
+    assert not any("Лекция" in label for label in h.buttons())
+    await h.click(MARKER, f"rqa:{((await h.repo.list_requests(status=None, student_id=student.id))[0]).id}")
+    assert h.session.last("AnswerCallbackQuery").text == "Запрос уже обработан."
+
+    await h.text(STUDENT, "/menu")
+    await h.click(STUDENT, "s:nreq")
+    await h.press(STUDENT, "Текущий")
+    assert any("Лекция" in label and not label.startswith("⏳") for label in h.buttons())
 
 
 async def test_removed_student_keeps_own_attendance(h: Harness):

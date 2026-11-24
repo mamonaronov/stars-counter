@@ -133,11 +133,26 @@ async def test_requests_and_excuses(repo: Repo):
     e = await repo.create_event("Лекция", "mandatory", "2026-09-02", None, None, 1)
     req = await repo.create_request(s.id, e.id, "был")
     assert await repo.has_open_request(s.id, e.id)
+    assert await repo.open_request_event_ids(s.id) == {e.id}
     assert await repo.count_open_requests() == 1
     resolved = await repo.resolve_request(req.id, "approved", 1, None)
     assert resolved is not None and resolved.status == "approved" and not await repo.has_open_request(s.id, e.id)
+    assert await repo.open_request_event_ids(s.id) == set()
     assert await repo.resolve_request(req.id, "rejected", 2, "поздно") is None
     assert (await repo.get_request(req.id)).status == "approved"
+    other = await repo.create_event("Семинар", "mandatory", "2026-09-03", None, None, 1)
+    mistaken = await repo.create_request(s.id, other.id, "ошибся")
+    assert mistaken is not None
+    assert await repo.cancel_request(mistaken.id, s.id + 1, 9) is None
+    withdrawn = await repo.cancel_request(mistaken.id, s.id, 9)
+    assert withdrawn is not None and withdrawn.status == "cancelled"
+    assert not await repo.has_open_request(s.id, other.id)
+    assert await repo.cancel_request(mistaken.id, s.id, 9) is None
+    assert await repo.create_request(s.id, other.id, "ещё раз") is not None
+    closed_ids = {item.id for item in await repo.list_requests(status=None, closed_only=True)}
+    assert req.id in closed_ids and mistaken.id in closed_ids
+    staff = [item.id for item in await repo.list_requests(status=None, closed_only=True, hide_cancelled=True)]
+    assert staff == [req.id]
 
     ex = await repo.create_excuse(s.id, "sick", "2026-09-01", "2026-09-05", "справка", 1)
     assert [x.id for x in await repo.list_excuses()] == [ex.id]
